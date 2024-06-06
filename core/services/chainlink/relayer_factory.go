@@ -25,6 +25,7 @@ import (
 	"github.com/smartcontractkit/chainlink/v2/core/config/env"
 	"github.com/smartcontractkit/chainlink/v2/core/logger"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore"
+	"github.com/smartcontractkit/chainlink/v2/core/services/relay/dummy"
 	evmrelay "github.com/smartcontractkit/chainlink/v2/core/services/relay/evm"
 	"github.com/smartcontractkit/chainlink/v2/core/services/relay/evm/mercury/wsrpc"
 	"github.com/smartcontractkit/chainlink/v2/plugins"
@@ -36,6 +37,14 @@ type RelayerFactory struct {
 	loop.GRPCOpts
 	MercuryPool          wsrpc.Pool
 	CapabilitiesRegistry *capabilities.Registry
+}
+
+type DummyFactoryConfig struct {
+	ChainID string
+}
+
+func (r *RelayerFactory) NewDummy(config DummyFactoryConfig) (loop.Relayer, error) {
+	return dummy.NewRelayer(r.Logger, config.ChainID), nil
 }
 
 type EVMFactoryConfig struct {

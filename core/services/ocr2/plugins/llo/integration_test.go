@@ -72,28 +72,31 @@ type Stream struct {
 	baseBenchmarkPrice *big.Int
 }
 
+var (
+	btcStream = Stream{
+		id:                 51,
+		baseBenchmarkPrice: big.NewInt(20_000 * multiplier),
+	}
+	ethStream = Stream{
+		id:                 52,
+		baseBenchmarkPrice: big.NewInt(1_568 * multiplier),
+	}
+	linkStream = Stream{
+		id:                 53,
+		baseBenchmarkPrice: big.NewInt(7150 * multiplier / 1000),
+	}
+	dogeStream = Stream{
+		id:                 54,
+		baseBenchmarkPrice: big.NewInt(2_020 * multiplier),
+	}
+)
+
 func TestIntegration_LLO(t *testing.T) {
 	testStartTimeStamp := uint32(time.Now().Unix())
 
 	const fromBlock = 1 // cannot use zero, start from block 1
 
 	// streams
-	btcStream := Stream{
-		id:                 51,
-		baseBenchmarkPrice: big.NewInt(20_000 * multiplier),
-	}
-	ethStream := Stream{
-		id:                 52,
-		baseBenchmarkPrice: big.NewInt(1_568 * multiplier),
-	}
-	linkStream := Stream{
-		id:                 53,
-		baseBenchmarkPrice: big.NewInt(7150 * multiplier / 1000),
-	}
-	dogeStream := Stream{
-		id:                 54,
-		baseBenchmarkPrice: big.NewInt(2_020 * multiplier),
-	}
 	streams := []Stream{btcStream, ethStream, linkStream, dogeStream}
 	streamMap := make(map[uint32]Stream)
 	for _, strm := range streams {
@@ -159,8 +162,16 @@ func TestIntegration_LLO(t *testing.T) {
 	configDigest := setConfig(t, steve, backend, verifierContract, verifierAddress, nodes, oracles)
 	channelDefinitions := setChannelDefinitions(t, steve, backend, configStoreContract, streams)
 
-	addBootstrapJob(t, bootstrapNode, chainID, verifierAddress, "job-1")
-	addOCRJobs(t, streams, serverPubKey, serverURL, verifierAddress, bootstrapPeerID, bootstrapNodePort, nodes, configStoreAddress, clientPubKeys, chainID, fromBlock)
+	relayType := "evm"
+	relayConfig := fmt.Sprintf(`chainID = %s
+fromBlock = %d`, chainID.String(), fromBlock)
+	addBootstrapJob(t, bootstrapNode, verifierAddress, "job-1", relayType, relayConfig)
+
+	pluginConfig := fmt.Sprintf(`serverURL = "%s"
+serverPubKey = "%x"
+channelDefinitionsContractFromBlock = %d
+channelDefinitionsContractAddress = "%s"`, serverURL, serverPubKey, fromBlock, configStoreAddress.String())
+	addOCRJobs(t, streams, serverPubKey, serverURL, verifierAddress, bootstrapPeerID, bootstrapNodePort, nodes, configStoreAddress, clientPubKeys, pluginConfig, relayType, relayConfig)
 	t.Run("receives at least one report per feed from each oracle when EAs are at 100% reliability", func(t *testing.T) {
 		// Expect at least one report per channel from each oracle (keyed by transmitter ID)
 		seen := make(map[ocr2types.Account]map[llotypes.ChannelID]struct{})
@@ -366,4 +377,69 @@ func setChannelDefinitions(t *testing.T, steve *bind.TransactOpts, backend *back
 	backend.Commit()
 
 	return channelDefinitions
+}
+
+func TestIntegration_LLO_Dummy(t *testing.T) {
+	// TODO
+	// streams
+	streams := []Stream{btcStream, ethStream, linkStream, dogeStream}
+	streamMap := make(map[uint32]Stream)
+	for _, strm := range streams {
+		streamMap[strm.id] = strm
+	}
+
+	clientCSAKeys := make([]csakey.KeyV2, nNodes)
+	clientPubKeys := make([]ed25519.PublicKey, nNodes)
+	for i := 0; i < nNodes; i++ {
+		k := big.NewInt(int64(i))
+		key := csakey.MustNewV2XXXTestingOnly(k)
+		clientCSAKeys[i] = key
+		clientPubKeys[i] = key.PublicKey
+	}
+
+	// Setup bootstrap
+	bootstrapCSAKey := csakey.MustNewV2XXXTestingOnly(big.NewInt(-1))
+	bootstrapNodePort := freeport.GetOne(t)
+	appBootstrap, bootstrapPeerID, _, bootstrapKb, _ := setupNode(t, bootstrapNodePort, "bootstrap_mercury", nil, bootstrapCSAKey)
+	bootstrapNode := Node{App: appBootstrap, KeyBundle: bootstrapKb}
+
+	// Setup oracle nodes
+	var (
+		oracles []confighelper.OracleIdentityExtra
+		nodes   []Node
+	)
+	ports := freeport.GetN(t, nNodes)
+	for i := 0; i < nNodes; i++ {
+		app, peerID, transmitter, kb, _ := setupNode(t, ports[i], fmt.Sprintf("oracle_streams_%d", i), nil, clientCSAKeys[i])
+
+		nodes = append(nodes, Node{
+			app, transmitter, kb,
+		})
+		offchainPublicKey, _ := hex.DecodeString(strings.TrimPrefix(kb.OnChainPublicKey(), "0x"))
+		oracles = append(oracles, confighelper.OracleIdentityExtra{
+			OracleIdentity: confighelper.OracleIdentity{
+				OnchainPublicKey:  offchainPublicKey,
+				TransmitAccount:   ocr2types.Account(fmt.Sprintf("%x", transmitter[:])),
+				OffchainPublicKey: kb.OffchainPublicKey(),
+				PeerID:            peerID,
+			},
+			ConfigEncryptionPublicKey: kb.ConfigEncryptionPublicKey(),
+		})
+	}
+
+	verifierAddress := common.Address{}
+	relayType := "dummy"
+	relayConfig := `chainID = "llo-dummy"
+foo = "bar"`
+	addBootstrapJob(t, bootstrapNode, verifierAddress, "job-1", relayType, relayConfig)
+
+	serverKey := csakey.MustNewV2XXXTestingOnly(big.NewInt(-1))
+	serverPubKey := serverKey.PublicKey
+	serverURL := "foo"
+	configStoreAddress := common.Address{}
+
+	pluginConfig := fmt.Sprintf(`serverURL = "foo"
+serverPubKey = "%x"
+channelDefinitions = "{}"`, serverPubKey)
+	addOCRJobs(t, streams, serverPubKey, serverURL, verifierAddress, bootstrapPeerID, bootstrapNodePort, nodes, configStoreAddress, clientPubKeys, pluginConfig, relayType, relayConfig)
 }
