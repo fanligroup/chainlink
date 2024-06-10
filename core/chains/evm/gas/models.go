@@ -258,6 +258,29 @@ func (e *evmFeeEstimator) L1Oracle() rollups.L1Oracle {
 	return e.EvmEstimator.L1Oracle()
 }
 
+func (e *evmFeeEstimator) getAdjustedFeeToMaxGasCost(fee *assets.Wei) *assets.Wei {
+	if e.geCfg.CostMax() != nil {
+		return fee
+	}
+	maxGasCost := e.geCfg.CostMax().ToInt().Uint64()
+	if maxGasCost == 0 {
+		return fee
+	}
+	totalGasCost, err := commonfee.ApplyMultiplier(fee.ToInt().Uint64(), e.geCfg.LimitMultiplier())
+	if err != nil {
+		return fee
+	}
+	if totalGasCost <= maxGasCost {
+		return fee
+	}
+	newFee, err := commonfee.ApplyMultiplier(maxGasCost, 1/e.geCfg.LimitMultiplier())
+	if err != nil {
+		return fee
+	}
+	e.lggr.Warnf("estimated gas cost %d exceeds maximum allowed gas cost %d. old fee adjused from %d to %d", totalGasCost, maxGasCost, fee.ToInt().Uint64(), newFee)
+	return assets.NewWei(new(big.Int).SetUint64(newFee))
+}
+
 func (e *evmFeeEstimator) GetFee(ctx context.Context, calldata []byte, feeLimit uint64, maxFeePrice *assets.Wei, opts ...feetypes.Opt) (fee EvmFee, chainSpecificFeeLimit uint64, err error) {
 	// get dynamic fee
 	if e.EIP1559Enabled {
@@ -271,14 +294,14 @@ func (e *evmFeeEstimator) GetFee(ctx context.Context, calldata []byte, feeLimit 
 		fee.DynamicTipCap = dynamicFee.TipCap
 		return
 	}
-
 	// get legacy fee
 	fee.Legacy, chainSpecificFeeLimit, err = e.EvmEstimator.GetLegacyGas(ctx, calldata, feeLimit, maxFeePrice, opts...)
 	if err != nil {
 		return
 	}
-	chainSpecificFeeLimit, err = commonfee.ApplyMultiplier(chainSpecificFeeLimit, e.geCfg.LimitMultiplier())
 
+	chainSpecificFeeLimit, err = commonfee.ApplyMultiplier(chainSpecificFeeLimit, e.geCfg.LimitMultiplier())
+	fee.Legacy = e.getAdjustedFeeToMaxGasCost(fee.Legacy)
 	return
 }
 
@@ -331,6 +354,7 @@ func (e *evmFeeEstimator) BumpFee(ctx context.Context, originalFee EvmFee, feeLi
 		return
 	}
 	chainSpecificFeeLimit, err = commonfee.ApplyMultiplier(chainSpecificFeeLimit, e.geCfg.LimitMultiplier())
+	bumpedFee.Legacy = e.getAdjustedFeeToMaxGasCost(bumpedFee.Legacy)
 	return
 }
 
@@ -348,6 +372,7 @@ type GasEstimatorConfig interface {
 	BumpPercent() uint16
 	BumpThreshold() uint64
 	BumpMin() *assets.Wei
+	CostMax() *assets.Wei
 	FeeCapDefault() *assets.Wei
 	LimitMax() uint64
 	LimitMultiplier() float32
