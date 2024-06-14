@@ -15,13 +15,15 @@ import (
 type LocalTargetCapability struct {
 	lggr logger.Logger
 	capabilities.TargetCapability
-	peerID p2ptypes.PeerID
-	don    capabilities.DON
+	capabilityID string
+	peerID       p2ptypes.PeerID
+	don          capabilities.DON
 }
 
-func NewLocalTargetCapability(lggr logger.Logger, peerID p2ptypes.PeerID, don capabilities.DON, underlying capabilities.TargetCapability) *LocalTargetCapability {
+func NewLocalTargetCapability(lggr logger.Logger, capabilityID string, peerID p2ptypes.PeerID, don capabilities.DON, underlying capabilities.TargetCapability) *LocalTargetCapability {
 	return &LocalTargetCapability{
 		TargetCapability: underlying,
+		capabilityID:     capabilityID,
 		lggr:             lggr,
 		peerID:           peerID,
 		don:              don,
@@ -36,7 +38,7 @@ func (l *LocalTargetCapability) Execute(ctx context.Context, req capabilities.Ca
 
 	peerIDToTransmissionDelay, err := GetPeerIDToTransmissionDelay(l.don.Members, req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get peer ID to transmission delay map: %w", err)
+		return nil, fmt.Errorf("capability id: %s failed to get peer ID to transmission delay map: %w", l.capabilityID, err)
 	}
 
 	delay, existsForPeerID := peerIDToTransmissionDelay[l.peerID]

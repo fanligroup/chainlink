@@ -136,7 +136,7 @@ func TestScheduledExecutionStrategy_LocalDON(t *testing.T) {
 				Members: ids,
 			}
 			peerID := ids[tc.position]
-			localTargetCapability := NewLocalTargetCapability(log, peerID, don, mt)
+			localTargetCapability := NewLocalTargetCapability(log, "<capabilityID>", peerID, don, mt)
 
 			_, err = localTargetCapability.Execute(tests.Context(t), req)
 
