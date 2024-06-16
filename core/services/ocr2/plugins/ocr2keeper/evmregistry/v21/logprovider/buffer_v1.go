@@ -342,7 +342,7 @@ func (q *upkeepLogQueue) dequeue(start, end int64, limit int) ([]logpoller.Log, 
 	for _, blockNumber := range q.blockNumbers {
 		if blockNumber >= start && blockNumber <= end {
 			updatedLogs := make([]logpoller.Log, 0)
-
+			blockResults := 0
 			for _, l := range q.logs[blockNumber] {
 				if len(results) < limit {
 					results = append(results, l)
@@ -351,13 +351,16 @@ func (q *upkeepLogQueue) dequeue(start, end int64, limit int) ([]logpoller.Log, 
 						s.state = logTriggerStateDequeued
 						q.states[lid] = s
 					}
+					blockResults++
 				} else {
 					remaining++
 					updatedLogs = append(updatedLogs, l)
 				}
 			}
 
-			q.logs[blockNumber] = updatedLogs
+			if blockResults > 0 {
+				q.logs[blockNumber] = updatedLogs
+			}
 		}
 	}
 
