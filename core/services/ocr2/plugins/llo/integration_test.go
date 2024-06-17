@@ -442,4 +442,6 @@ foo = "bar"`
 serverPubKey = "%x"
 channelDefinitions = "{}"`, serverPubKey)
 	addOCRJobs(t, streams, serverPubKey, serverURL, verifierAddress, bootstrapPeerID, bootstrapNodePort, nodes, configStoreAddress, clientPubKeys, pluginConfig, relayType, relayConfig)
+
+	// TODO verify it does something
 }

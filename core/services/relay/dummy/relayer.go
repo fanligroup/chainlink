@@ -8,8 +8,9 @@ import (
 	"github.com/smartcontractkit/chainlink-common/pkg/types"
 
 	"github.com/smartcontractkit/chainlink/v2/core/logger"
+	"github.com/smartcontractkit/chainlink/v2/core/services/llo"
+	"github.com/smartcontractkit/chainlink/v2/core/services/llo/bm"
 	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/llo/config"
-	"github.com/smartcontractkit/chainlink/v2/core/services/relay/dummy/bm"
 )
 
 // The dummy relayer is a simple reference implementation that doesn't actually
@@ -44,7 +45,7 @@ func (r *relayer) NewLLOProvider(ctx context.Context, rargs types.RelayArgs, par
 	if err = pluginCfg.Unmarshal(pargs.PluginConfig); err != nil {
 		return nil, err
 	}
-	cdc, err := NewChannelDefinitionCache(r.lggr, pluginCfg.ChannelDefinitions)
+	cdc, err := llo.NewStaticChannelDefinitionCache(r.lggr, pluginCfg.ChannelDefinitions)
 	if err != nil {
 		return nil, err
 	}
