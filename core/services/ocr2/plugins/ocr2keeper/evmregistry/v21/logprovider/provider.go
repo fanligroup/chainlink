@@ -123,7 +123,7 @@ type logEventProvider struct {
 }
 
 func NewLogProvider(lggr logger.Logger, poller logpoller.LogPoller, chainID *big.Int, packer LogDataPacker, filterStore UpkeepFilterStore, opts LogTriggersOptions) *logEventProvider {
-	dequeueCoordinator := NewDequeueCoordinator()
+	dequeueCoordinator := NewDequeueCoordinator(lggr.Named("KeepersRegistry.DequeueCoordinator"))
 	return &logEventProvider{
 		threadCtrl:         utils.NewThreadControl(),
 		lggr:               lggr.Named("KeepersRegistry.LogEventProvider"),

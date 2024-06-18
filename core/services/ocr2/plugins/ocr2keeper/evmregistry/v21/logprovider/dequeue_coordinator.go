@@ -3,6 +3,8 @@ package logprovider
 import (
 	"math/big"
 	"sync"
+
+	"github.com/smartcontractkit/chainlink/v2/core/logger"
 )
 
 type DequeueCoordinator interface {
@@ -36,9 +38,10 @@ type dequeueCoordinator struct {
 	completeWindows map[int64]bool
 	dequeuedUpkeeps map[int64]map[string]int
 	mu              sync.Mutex
+	lggr            logger.Logger
 }
 
-func NewDequeueCoordinator() *dequeueCoordinator {
+func NewDequeueCoordinator(lggr logger.Logger) *dequeueCoordinator {
 	return &dequeueCoordinator{
 		dequeuedMinimum: map[int64]bool{},
 		notReady:        map[int64]bool{},
@@ -46,6 +49,7 @@ func NewDequeueCoordinator() *dequeueCoordinator {
 		dequeuedLogs:    map[int64]int{},
 		completeWindows: map[int64]bool{},
 		dequeuedUpkeeps: map[int64]map[string]int{},
+		lggr:            lggr,
 	}
 }
 
@@ -58,11 +62,14 @@ func (c *dequeueCoordinator) DequeueBlockWindow(start int64, latestBlock int64, 
 		startWindow, end := getBlockWindow(i, blockRate)
 		if latestBlock >= end {
 			c.completeWindows[startWindow] = true
+			c.notReady[startWindow] = false
 		} else if c.notReady[startWindow] { // the window is incomplete and has no logs to provide as of yet
 			break
 		}
 
 		if hasDequeued, ok := c.dequeuedMinimum[startWindow]; !ok || !hasDequeued {
+			c.lggr.With("where", "DequeueBlockWindow").Infow("dequeuing min guaranteed logs", "startWindow", startWindow, "latestBlock", latestBlock)
+
 			return startWindow, end, true
 		}
 	}
@@ -73,10 +80,13 @@ func (c *dequeueCoordinator) DequeueBlockWindow(start int64, latestBlock int64, 
 
 		if remainingLogs, ok := c.remainingLogs[startWindow]; ok {
 			if remainingLogs > 0 {
+				c.lggr.With("where", "DequeueBlockWindow").Infow("dequeuing best effort logs", "startWindow", startWindow, "latestBlock", latestBlock)
 				return startWindow, end, true
 			}
 		}
 	}
+
+	c.lggr.With("where", "DequeueBlockWindow").Infow("nothing to dequeue", "len(c.completeWindows)", len(c.completeWindows), "latestBlock", latestBlock)
 
 	return 0, 0, false
 }
