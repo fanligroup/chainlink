@@ -68,7 +68,7 @@ func (c *dequeueCoordinator) DequeueBlockWindow(start int64, latestBlock int64, 
 		}
 
 		if hasDequeued, ok := c.dequeuedMinimum[startWindow]; !ok || !hasDequeued {
-			c.lggr.With("where", "DequeueBlockWindow").Infow("dequeuing min guaranteed logs", "startWindow", startWindow, "latestBlock", latestBlock)
+			c.lggr.With("where", "DequeueBlockWindow").Infow("dequeuing min guaranteed logs", "startWindow", startWindow, "end", end, "latestBlock", latestBlock, "blockRate", blockRate)
 
 			return startWindow, end, true
 		}
@@ -80,13 +80,13 @@ func (c *dequeueCoordinator) DequeueBlockWindow(start int64, latestBlock int64, 
 
 		if remainingLogs, ok := c.remainingLogs[startWindow]; ok {
 			if remainingLogs > 0 {
-				c.lggr.With("where", "DequeueBlockWindow").Infow("dequeuing best effort logs", "startWindow", startWindow, "latestBlock", latestBlock)
+				c.lggr.With("where", "DequeueBlockWindow").Infow("dequeuing best effort logs", "startWindow", startWindow, "end", end, "latestBlock", latestBlock, "blockRate", blockRate)
 				return startWindow, end, true
 			}
 		}
 	}
 
-	c.lggr.With("where", "DequeueBlockWindow").Infow("nothing to dequeue", "len(c.completeWindows)", len(c.completeWindows), "latestBlock", latestBlock)
+	c.lggr.With("where", "DequeueBlockWindow").Infow("nothing to dequeue", "len(c.completeWindows)", len(c.completeWindows), "latestBlock", latestBlock, "blockRate", blockRate)
 
 	return 0, 0, false
 }
