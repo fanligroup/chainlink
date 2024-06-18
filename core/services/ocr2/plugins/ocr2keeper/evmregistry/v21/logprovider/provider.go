@@ -333,7 +333,7 @@ func (p *logEventProvider) getLogsFromBuffer(latestBlock int64) []ocr2keepers.Up
 
 			logs, remaining := p.bufferV1.Dequeue(startWindow, end, logLimitLow, maxResults-len(payloads), upkeepSelectorFn)
 			if len(logs) > 0 {
-				p.lggr.Debugw("Dequeued logs", "start", start, "latestBlock", latestBlock, "logs", len(logs))
+				p.lggr.Debugw("Dequeued logs", "start", start, "latestBlock", latestBlock, "logs", len(logs), "remaining", remaining)
 				for _, l := range logs {
 					payload, err := p.createPayload(l.ID, l.Log)
 					if err == nil {
@@ -343,7 +343,7 @@ func (p *logEventProvider) getLogsFromBuffer(latestBlock int64) []ocr2keepers.Up
 				}
 			}
 
-			p.dequeueCoordinator.UpdateBlockWindow(startWindow, len(logs), remaining, numOfUpkeeps, logLimitLow)
+			p.dequeueCoordinator.UpdateBlockWindow(startWindow, len(logs), numOfUpkeeps, logLimitLow)
 		}
 		p.currentIteration++
 	default:

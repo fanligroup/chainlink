@@ -24,16 +24,17 @@ type DequeueCoordinator interface {
 	// remaining logs, and the number of upkeeps. This function tracks remaining and dequeued logs for the specified
 	// block window, determines if a block window has had the minimum number of guaranteed logs dequeued, and marks a
 	// window as not ready if there are not yet any logs available to dequeue from the window.
-	UpdateBlockWindow(startWindow int64, logs, remaining, numberOfUpkeeps, logLimitLow int)
+	UpdateBlockWindow(startWindow int64, logs, numberOfUpkeeps, logLimitLow int)
 	// MarkReorg handles the detection of a reorg  by resetting the state of the affected block window. It ensures that
 	// upkeeps within the specified block window are marked as not having the minimum number of guaranteed logs dequeued.
 	MarkReorg(block int64, blockRate uint32)
+	Increment(block int64, blockRate uint32, added int)
 }
 
 type dequeueCoordinator struct {
 	dequeuedMinimum map[int64]bool
 	notReady        map[int64]bool
-	remainingLogs   map[int64]int
+	enqueuedLogs    map[int64]int
 	dequeuedLogs    map[int64]int
 	completeWindows map[int64]bool
 	dequeuedUpkeeps map[int64]map[string]int
@@ -45,7 +46,7 @@ func NewDequeueCoordinator(lggr logger.Logger) *dequeueCoordinator {
 	return &dequeueCoordinator{
 		dequeuedMinimum: map[int64]bool{},
 		notReady:        map[int64]bool{},
-		remainingLogs:   map[int64]int{},
+		enqueuedLogs:    map[int64]int{},
 		dequeuedLogs:    map[int64]int{},
 		completeWindows: map[int64]bool{},
 		dequeuedUpkeeps: map[int64]map[string]int{},
@@ -78,7 +79,7 @@ func (c *dequeueCoordinator) DequeueBlockWindow(start int64, latestBlock int64, 
 	for i := start; i < latestBlock; i += int64(blockRate) {
 		startWindow, end := getBlockWindow(i, blockRate)
 
-		if remainingLogs, ok := c.remainingLogs[startWindow]; ok {
+		if remainingLogs, ok := c.enqueuedLogs[startWindow]; ok {
 			if remainingLogs > 0 {
 				c.lggr.With("where", "DequeueBlockWindow").Infow("dequeuing best effort logs", "startWindow", startWindow, "end", end, "latestBlock", latestBlock, "blockRate", blockRate)
 				return startWindow, end, true
@@ -131,17 +132,17 @@ func (c *dequeueCoordinator) TrackUpkeeps(startWindow int64, upkeepID *big.Int) 
 	}
 }
 
-func (c *dequeueCoordinator) UpdateBlockWindow(startWindow int64, logs, remaining, numberOfUpkeeps, logLimitLow int) {
+func (c *dequeueCoordinator) UpdateBlockWindow(startWindow int64, logs, numberOfUpkeeps, logLimitLow int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	c.remainingLogs[startWindow] = remaining
+	c.enqueuedLogs[startWindow] -= logs
 	c.dequeuedLogs[startWindow] += logs
 
 	if isComplete, ok := c.completeWindows[startWindow]; ok {
 		if isComplete {
 			// if the window is complete, and there are no more logs, then we have to consider this as min dequeued, even if no logs were dequeued
-			if c.remainingLogs[startWindow] == 0 || c.dequeuedLogs[startWindow] >= numberOfUpkeeps*logLimitLow {
+			if c.enqueuedLogs[startWindow] <= 0 || c.dequeuedLogs[startWindow] >= numberOfUpkeeps*logLimitLow {
 				c.dequeuedMinimum[startWindow] = true
 			}
 		} else if c.dequeuedLogs[startWindow] >= numberOfUpkeeps*logLimitLow { // this assumes we don't dequeue the same upkeeps more than logLimitLow in min commitment
@@ -149,7 +150,7 @@ func (c *dequeueCoordinator) UpdateBlockWindow(startWindow int64, logs, remainin
 		}
 	} else if c.dequeuedLogs[startWindow] >= numberOfUpkeeps*logLimitLow { // this assumes we don't dequeue the same upkeeps more than logLimitLow in min commitment
 		c.dequeuedMinimum[startWindow] = true
-	} else if logs == 0 && remaining == 0 {
+	} else if logs == 0 && c.enqueuedLogs[startWindow] <= 0 {
 		c.notReady[startWindow] = true
 	}
 }
@@ -164,4 +165,12 @@ func (c *dequeueCoordinator) MarkReorg(block int64, blockRate uint32) {
 	for upkeepID := range c.dequeuedUpkeeps[startWindow] {
 		c.dequeuedUpkeeps[startWindow][upkeepID] = 0
 	}
+}
+
+func (c *dequeueCoordinator) Increment(block int64, blockRate uint32, added int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	startWindow, _ := getBlockWindow(block, int(blockRate))
+	c.enqueuedLogs[startWindow] += added
 }

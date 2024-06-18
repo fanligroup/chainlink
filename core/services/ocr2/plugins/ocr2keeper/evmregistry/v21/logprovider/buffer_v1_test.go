@@ -15,7 +15,7 @@ import (
 )
 
 func TestLogEventBufferV1(t *testing.T) {
-	buf := NewLogBuffer(logger.TestLogger(t), 10, 20, 1, NewDequeueCoordinator())
+	buf := NewLogBuffer(logger.TestLogger(t), 10, 20, 1, NewDequeueCoordinator(logger.TestLogger(t)))
 
 	buf.Enqueue(big.NewInt(1),
 		logpoller.Log{BlockNumber: 2, TxHash: common.HexToHash("0x1"), LogIndex: 0},
@@ -35,7 +35,7 @@ func TestLogEventBufferV1(t *testing.T) {
 }
 
 func TestLogEventBufferV1_SyncFilters(t *testing.T) {
-	buf := NewLogBuffer(logger.TestLogger(t), 10, 20, 1, NewDequeueCoordinator())
+	buf := NewLogBuffer(logger.TestLogger(t), 10, 20, 1, NewDequeueCoordinator(logger.TestLogger(t)))
 
 	buf.Enqueue(big.NewInt(1),
 		logpoller.Log{BlockNumber: 2, TxHash: common.HexToHash("0x1"), LogIndex: 0},
@@ -98,7 +98,7 @@ func TestLogEventBufferV1_EnqueueViolations(t *testing.T) {
 			},
 		}
 
-		logBufferV1 := NewLogBuffer(readableLogger, 10, 20, 1, NewDequeueCoordinator())
+		logBufferV1 := NewLogBuffer(readableLogger, 10, 20, 1, NewDequeueCoordinator(logger.TestLogger(t)))
 
 		buf := logBufferV1.(*logBuffer)
 
@@ -128,7 +128,7 @@ func TestLogEventBufferV1_EnqueueViolations(t *testing.T) {
 			},
 		}
 
-		logBufferV1 := NewLogBuffer(readableLogger, 10, 20, 1, NewDequeueCoordinator())
+		logBufferV1 := NewLogBuffer(readableLogger, 10, 20, 1, NewDequeueCoordinator(logger.TestLogger(t)))
 
 		buf := logBufferV1.(*logBuffer)
 
@@ -236,7 +236,7 @@ func TestLogEventBufferV1_Dequeue(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			buf := NewLogBuffer(logger.TestLogger(t), uint32(tc.lookback), uint32(tc.args.blockRate), uint32(tc.args.upkeepLimit), NewDequeueCoordinator())
+			buf := NewLogBuffer(logger.TestLogger(t), uint32(tc.lookback), uint32(tc.args.blockRate), uint32(tc.args.upkeepLimit), NewDequeueCoordinator(logger.TestLogger(t)))
 			for id, logs := range tc.logsInBuffer {
 				added, dropped := buf.Enqueue(id, logs...)
 				require.Equal(t, len(logs), added+dropped)
@@ -254,7 +254,7 @@ func TestLogEventBufferV1_Dequeue_highLoad(t *testing.T) {
 		lookback := uint32(20)
 		blockRate := uint32(1)
 		logLimit := uint32(1)
-		buf := NewLogBuffer(logger.TestLogger(t), lookback, blockRate, logLimit, NewDequeueCoordinator())
+		buf := NewLogBuffer(logger.TestLogger(t), lookback, blockRate, logLimit, NewDequeueCoordinator(logger.TestLogger(t)))
 
 		upkeepIDs := []*big.Int{
 			big.NewInt(1),
@@ -481,7 +481,7 @@ func TestLogEventBufferV1_Enqueue(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			buf := NewLogBuffer(logger.TestLogger(t), tc.lookback, tc.blockRate, tc.upkeepLimit, NewDequeueCoordinator())
+			buf := NewLogBuffer(logger.TestLogger(t), tc.lookback, tc.blockRate, tc.upkeepLimit, NewDequeueCoordinator(logger.TestLogger(t)))
 			for id, logs := range tc.logsToAdd {
 				added, dropped := buf.Enqueue(id, logs...)
 				sid := id.String()
@@ -504,10 +504,12 @@ func TestLogEventBufferV1_Enqueue(t *testing.T) {
 }
 
 func TestLogEventBufferV1_UpkeepQueue(t *testing.T) {
+	dequeueCoordinator := NewDequeueCoordinator(logger.TestLogger(t))
+
 	t.Run("enqueue dequeue", func(t *testing.T) {
 		q := newUpkeepLogQueue(logger.TestLogger(t), big.NewInt(1), newLogBufferOptions(10, 1, 1))
 
-		added, dropped := q.enqueue(10, logpoller.Log{BlockNumber: 20, TxHash: common.HexToHash("0x1"), LogIndex: 0})
+		added, dropped := q.enqueue(dequeueCoordinator, 1, 10, logpoller.Log{BlockNumber: 20, TxHash: common.HexToHash("0x1"), LogIndex: 0})
 		require.Equal(t, 0, dropped)
 		require.Equal(t, 1, added)
 		require.Equal(t, 1, q.sizeOfRange(1, 20))
@@ -519,7 +521,7 @@ func TestLogEventBufferV1_UpkeepQueue(t *testing.T) {
 	t.Run("enqueue with limits", func(t *testing.T) {
 		q := newUpkeepLogQueue(logger.TestLogger(t), big.NewInt(1), newLogBufferOptions(10, 1, 1))
 
-		added, dropped := q.enqueue(10,
+		added, dropped := q.enqueue(dequeueCoordinator, 1, 10,
 			createDummyLogSequence(15, 0, 20, common.HexToHash("0x20"))...,
 		)
 		require.Equal(t, 5, dropped)
@@ -529,7 +531,7 @@ func TestLogEventBufferV1_UpkeepQueue(t *testing.T) {
 	t.Run("dequeue with limits", func(t *testing.T) {
 		q := newUpkeepLogQueue(logger.TestLogger(t), big.NewInt(1), newLogBufferOptions(10, 1, 3))
 
-		added, dropped := q.enqueue(10,
+		added, dropped := q.enqueue(dequeueCoordinator, 1, 10,
 			logpoller.Log{BlockNumber: 20, TxHash: common.HexToHash("0x1"), LogIndex: 0},
 			logpoller.Log{BlockNumber: 20, TxHash: common.HexToHash("0x1"), LogIndex: 1},
 			logpoller.Log{BlockNumber: 20, TxHash: common.HexToHash("0x1"), LogIndex: 10},
@@ -544,6 +546,8 @@ func TestLogEventBufferV1_UpkeepQueue(t *testing.T) {
 }
 
 func TestLogEventBufferV1_UpkeepQueue_sizeOfRange(t *testing.T) {
+	dequeueCoordinator := NewDequeueCoordinator(logger.TestLogger(t))
+
 	t.Run("empty", func(t *testing.T) {
 		q := newUpkeepLogQueue(logger.TestLogger(t), big.NewInt(1), newLogBufferOptions(10, 1, 1))
 
@@ -553,7 +557,7 @@ func TestLogEventBufferV1_UpkeepQueue_sizeOfRange(t *testing.T) {
 	t.Run("happy path", func(t *testing.T) {
 		q := newUpkeepLogQueue(logger.TestLogger(t), big.NewInt(1), newLogBufferOptions(10, 1, 1))
 
-		added, dropped := q.enqueue(10, logpoller.Log{BlockNumber: 20, TxHash: common.HexToHash("0x1"), LogIndex: 0})
+		added, dropped := q.enqueue(dequeueCoordinator, 1, 10, logpoller.Log{BlockNumber: 20, TxHash: common.HexToHash("0x1"), LogIndex: 0})
 		require.Equal(t, 0, dropped)
 		require.Equal(t, 1, added)
 		require.Equal(t, 0, q.sizeOfRange(1, 10))
@@ -569,7 +573,7 @@ func TestLogEventBufferV1_UpkeepQueue_clean(t *testing.T) {
 	})
 
 	t.Run("happy path", func(t *testing.T) {
-		buf := NewLogBuffer(logger.TestLogger(t), 10, 5, 1, NewDequeueCoordinator())
+		buf := NewLogBuffer(logger.TestLogger(t), 10, 5, 1, NewDequeueCoordinator(logger.TestLogger(t)))
 
 		buf.Enqueue(big.NewInt(1),
 			logpoller.Log{BlockNumber: 2, TxHash: common.HexToHash("0x1"), LogIndex: 0},
