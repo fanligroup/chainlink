@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"maps"
-	"math/big"
 	"net/url"
 	"os"
 	"regexp"
@@ -13,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/google/uuid"
 	"github.com/pelletier/go-toml/v2"
@@ -23,12 +21,11 @@ import (
 	tc "github.com/testcontainers/testcontainers-go"
 	tcwait "github.com/testcontainers/testcontainers-go/wait"
 
-	"github.com/smartcontractkit/chainlink-testing-framework/blockchain"
-	"github.com/smartcontractkit/chainlink-testing-framework/docker"
-	"github.com/smartcontractkit/chainlink-testing-framework/docker/test_env"
-	"github.com/smartcontractkit/chainlink-testing-framework/logging"
-	"github.com/smartcontractkit/chainlink-testing-framework/logstream"
-	"github.com/smartcontractkit/chainlink-testing-framework/utils/testcontext"
+	"github.com/smartcontractkit/chainlink-testing-framework/lib/docker"
+	"github.com/smartcontractkit/chainlink-testing-framework/lib/docker/test_env"
+	"github.com/smartcontractkit/chainlink-testing-framework/lib/logging"
+	"github.com/smartcontractkit/chainlink-testing-framework/lib/logstream"
+	"github.com/smartcontractkit/chainlink-testing-framework/lib/utils/testcontext"
 
 	"github.com/smartcontractkit/chainlink/v2/core/services/chainlink"
 	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/chaintype"
@@ -36,11 +33,13 @@ import (
 	"github.com/smartcontractkit/chainlink/integration-tests/client"
 	it_utils "github.com/smartcontractkit/chainlink/integration-tests/utils"
 	"github.com/smartcontractkit/chainlink/integration-tests/utils/templates"
+	grapqlClient "github.com/smartcontractkit/chainlink/integration-tests/web/sdk/client"
 )
 
 var (
-	ErrConnectNodeClient    = "could not connect Node HTTP Client"
-	ErrStartCLNodeContainer = "failed to start CL node container"
+	ErrConnectNodeClient        = "could not connect Node HTTP Client"
+	ErrConnectNodeGraphqlClient = "could not connect Node Graphql Client"
+	ErrStartCLNodeContainer     = "failed to start CL node container"
 )
 
 const (
@@ -57,6 +56,7 @@ type ClNode struct {
 	UserEmail             string                  `json:"userEmail"`
 	UserPassword          string                  `json:"userPassword"`
 	AlwaysPullImage       bool                    `json:"-"`
+	GraphqlAPI            grapqlClient.Client     `json:"-"`
 	t                     *testing.T
 	l                     zerolog.Logger
 }
@@ -75,6 +75,14 @@ func WithNodeEnvVars(ev map[string]string) ClNodeOption {
 			n.ContainerEnvs = map[string]string{}
 		}
 		maps.Copy(n.ContainerEnvs, ev)
+	}
+}
+
+func WithStartupTimeout(timeout time.Duration) ClNodeOption {
+	return func(n *ClNode) {
+		if timeout != 0 {
+			n.StartupTimeout = timeout
+		}
 	}
 }
 
@@ -133,6 +141,7 @@ func NewClNode(networks []string, imageName, imageVersion string, nodeConfig *ch
 			ContainerVersion: imageVersion,
 			Networks:         networks,
 			LogStream:        logStream,
+			StartupTimeout:   3 * time.Minute,
 		},
 		UserEmail:    "local@local.com",
 		UserPassword: "localdevpassword",
@@ -271,25 +280,6 @@ func (n *ClNode) ChainlinkNodeAddress() (common.Address, error) {
 	return common.HexToAddress(addr), nil
 }
 
-func (n *ClNode) Fund(evmClient blockchain.EVMClient, amount *big.Float) error {
-	toAddress, err := n.API.PrimaryEthAddress()
-	if err != nil {
-		return err
-	}
-	n.l.Debug().
-		Str("ChainId", evmClient.GetChainID().String()).
-		Str("Address", toAddress).
-		Msg("Funding Chainlink Node")
-	toAddr := common.HexToAddress(toAddress)
-	gasEstimates, err := evmClient.EstimateGas(ethereum.CallMsg{
-		To: &toAddr,
-	})
-	if err != nil {
-		return err
-	}
-	return evmClient.Fund(toAddress, amount, gasEstimates)
-}
-
 func (n *ClNode) containerStartOrRestart(restartDb bool) error {
 	var err error
 	if restartDb {
@@ -352,21 +342,25 @@ func (n *ClNode) containerStartOrRestart(restartDb bool) error {
 		Str("userEmail", n.UserEmail).
 		Str("userPassword", n.UserPassword).
 		Msg("Started Chainlink Node container")
-	nodeConfig, _ := n.GetNodeConfigStr()
-	n.l.Info().Str("containerName", n.ContainerName).Msgf("Chainlink Node config:\n%s", nodeConfig)
-	clClient, err := client.NewChainlinkClient(&client.ChainlinkConfig{
+	config := &client.ChainlinkConfig{
 		URL:        clEndpoint,
 		Email:      n.UserEmail,
 		Password:   n.UserPassword,
 		InternalIP: ip,
-	},
-		n.l)
+	}
+	clClient, err := client.NewChainlinkClient(config, n.l)
 	if err != nil {
 		return fmt.Errorf("%s err: %w", ErrConnectNodeClient, err)
 	}
 
+	graphqlClient, err := newChainLinkGraphqlClient(config)
+	if err != nil {
+		return fmt.Errorf("%s err: %w", ErrConnectNodeGraphqlClient, err)
+	}
+
 	n.Container = container
 	n.API = clClient
+	n.GraphqlAPI = graphqlClient
 
 	return nil
 }
@@ -471,9 +465,9 @@ func (n *ClNode) getContainerRequest(secrets string) (
 			"-a", apiCredsPath,
 		},
 		Networks: append(n.Networks, "tracing"),
-		WaitingFor: tcwait.ForHTTP("/health").
+		WaitingFor: tcwait.ForHTTP("/readyz").
 			WithPort("6688/tcp").
-			WithStartupTimeout(90 * time.Second).
+			WithStartupTimeout(n.StartupTimeout).
 			WithPollInterval(1 * time.Second),
 		Files: []tc.ContainerFile{
 			{
@@ -505,4 +499,12 @@ func (n *ClNode) getContainerRequest(secrets string) (
 			},
 		},
 	}, nil
+}
+
+func newChainLinkGraphqlClient(c *client.ChainlinkConfig) (grapqlClient.Client, error) {
+	nodeClient, err := grapqlClient.New(c.URL, grapqlClient.Credentials{Email: c.Email, Password: c.Password})
+	if err != nil {
+		return nil, err
+	}
+	return nodeClient, nil
 }

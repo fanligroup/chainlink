@@ -13,7 +13,7 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/slack-go/slack"
 
-	"github.com/smartcontractkit/chainlink-testing-framework/testreporters"
+	"github.com/smartcontractkit/chainlink-testing-framework/lib/testreporters"
 	"github.com/smartcontractkit/chainlink/integration-tests/client"
 )
 
@@ -137,24 +137,22 @@ func (k *KeeperBlockTimeTestReporter) SendSlackNotification(t *testing.T, slackC
 		return err
 	}
 
-	if err := testreporters.UploadSlackFile(slackClient, slack.FileUploadParameters{
+	if err := testreporters.UploadSlackFile(slackClient, slack.UploadFileV2Parameters{
 		Title:           fmt.Sprintf("Keeper Block Time Test Report %s", k.namespace),
-		Filetype:        "csv",
 		Filename:        fmt.Sprintf("keeper_block_time_%s.csv", k.namespace),
 		File:            k.keeperReportFile,
 		InitialComment:  fmt.Sprintf("Keeper Block Time Test Report %s", k.namespace),
-		Channels:        []string{testreporters.SlackChannel},
+		Channel:         testreporters.SlackChannel,
 		ThreadTimestamp: ts,
 	}); err != nil {
 		return err
 	}
-	return testreporters.UploadSlackFile(slackClient, slack.FileUploadParameters{
+	return testreporters.UploadSlackFile(slackClient, slack.UploadFileV2Parameters{
 		Title:           fmt.Sprintf("Keeper Block Time Attempted Chainlink Txs %s", k.namespace),
-		Filetype:        "json",
 		Filename:        fmt.Sprintf("attempted_cl_txs_%s.json", k.namespace),
 		File:            k.attemptedTransactionsFile,
 		InitialComment:  fmt.Sprintf("Keeper Block Time Attempted Txs %s", k.namespace),
-		Channels:        []string{testreporters.SlackChannel},
+		Channel:         testreporters.SlackChannel,
 		ThreadTimestamp: ts,
 	})
 }

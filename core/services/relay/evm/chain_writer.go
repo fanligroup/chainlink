@@ -8,8 +8,8 @@ import (
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/google/uuid"
 
+	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	commonservices "github.com/smartcontractkit/chainlink-common/pkg/services"
 	commontypes "github.com/smartcontractkit/chainlink-common/pkg/types"
 
@@ -19,8 +19,8 @@ import (
 	evmclient "github.com/smartcontractkit/chainlink/v2/core/chains/evm/client"
 	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/gas"
 	evmtxmgr "github.com/smartcontractkit/chainlink/v2/core/chains/evm/txmgr"
-	"github.com/smartcontractkit/chainlink/v2/core/logger"
 	"github.com/smartcontractkit/chainlink/v2/core/services"
+	"github.com/smartcontractkit/chainlink/v2/core/services/relay/evm/codec"
 	"github.com/smartcontractkit/chainlink/v2/core/services/relay/evm/types"
 )
 
@@ -44,13 +44,8 @@ func NewChainWriterService(logger logger.Logger, client evmclient.Client, txm ev
 		ge:          estimator,
 		maxGasPrice: config.MaxGasPrice,
 
-		sendStrategy:    txmgr.NewSendEveryStrategy(),
 		contracts:       config.Contracts,
-		parsedContracts: &parsedTypes{encoderDefs: map[string]types.CodecEntry{}, decoderDefs: map[string]types.CodecEntry{}},
-	}
-
-	if config.SendStrategy != nil {
-		w.sendStrategy = config.SendStrategy
+		parsedContracts: &codec.ParsedTypes{EncoderDefs: map[string]types.CodecEntry{}, DecoderDefs: map[string]types.CodecEntry{}},
 	}
 
 	if err := w.parseContracts(); err != nil {
@@ -58,7 +53,7 @@ func NewChainWriterService(logger logger.Logger, client evmclient.Client, txm ev
 	}
 
 	var err error
-	if w.encoder, err = w.parsedContracts.toCodec(); err != nil {
+	if w.encoder, err = w.parsedContracts.ToCodec(); err != nil {
 		return nil, fmt.Errorf("%w: failed to create codec", err)
 	}
 
@@ -74,9 +69,8 @@ type chainWriter struct {
 	ge          gas.EvmFeeEstimator
 	maxGasPrice *assets.Wei
 
-	sendStrategy    txmgrtypes.TxStrategy
 	contracts       map[string]*types.ContractConfig
-	parsedContracts *parsedTypes
+	parsedContracts *codec.ParsedTypes
 
 	encoder commontypes.Encoder
 }
@@ -101,7 +95,7 @@ func (w *chainWriter) SubmitTransaction(ctx context.Context, contract, method st
 		return fmt.Errorf("method config not found: %v", method)
 	}
 
-	calldata, err := w.encoder.Encode(ctx, args, wrapItemType(contract, method, true))
+	calldata, err := w.encoder.Encode(ctx, args, codec.WrapItemType(contract, method, true))
 	if err != nil {
 		return fmt.Errorf("%w: failed to encode args", err)
 	}
@@ -111,14 +105,33 @@ func (w *chainWriter) SubmitTransaction(ctx context.Context, contract, method st
 		checker.CheckerType = txmgrtypes.TransmitCheckerType(methodConfig.Checker)
 	}
 
+	v := big.NewInt(0)
+	if value != nil {
+		v = value
+	}
+
+	var txMeta *txmgrtypes.TxMeta[common.Address, common.Hash]
+	if meta != nil && meta.WorkflowExecutionID != nil {
+		txMeta = &txmgrtypes.TxMeta[common.Address, common.Hash]{
+			WorkflowExecutionID: meta.WorkflowExecutionID,
+		}
+	}
+
+	gasLimit := methodConfig.GasLimit
+	if meta != nil && meta.GasLimit != nil {
+		gasLimit = meta.GasLimit.Uint64()
+	}
+
 	req := evmtxmgr.TxRequest{
 		FromAddress:    methodConfig.FromAddress,
 		ToAddress:      common.HexToAddress(toAddress),
 		EncodedPayload: calldata,
-		FeeLimit:       methodConfig.GasLimit,
-		Meta:           &txmgrtypes.TxMeta[common.Address, common.Hash]{WorkflowExecutionID: meta.WorkflowExecutionID},
-		Strategy:       w.sendStrategy,
+		FeeLimit:       gasLimit,
+		Meta:           txMeta,
+		IdempotencyKey: &transactionID,
+		Strategy:       txmgr.NewSendEveryStrategy(),
 		Checker:        checker,
+		Value:          *v,
 	}
 
 	_, err = w.txm.CreateTransaction(ctx, req)
@@ -143,7 +156,7 @@ func (w *chainWriter) parseContracts() error {
 			}
 
 			// ABI.Pack prepends the method.ID to the encodings, we'll need the encoder to do the same.
-			inputMod, err := methodConfig.InputModifications.ToModifier(evmDecoderHooks...)
+			inputMod, err := methodConfig.InputModifications.ToModifier(codec.DecoderHooks...)
 			if err != nil {
 				return fmt.Errorf("%w: failed to create input mods", err)
 			}
@@ -154,15 +167,15 @@ func (w *chainWriter) parseContracts() error {
 				return fmt.Errorf("%w: failed to init codec entry for method %s", err, method)
 			}
 
-			w.parsedContracts.encoderDefs[wrapItemType(contract, method, true)] = input
+			w.parsedContracts.EncoderDefs[codec.WrapItemType(contract, method, true)] = input
 		}
 	}
 
 	return nil
 }
 
-func (w *chainWriter) GetTransactionStatus(ctx context.Context, transactionID uuid.UUID) (commontypes.TransactionStatus, error) {
-	return commontypes.Unknown, fmt.Errorf("not implemented")
+func (w *chainWriter) GetTransactionStatus(ctx context.Context, transactionID string) (commontypes.TransactionStatus, error) {
+	return w.txm.GetTransactionStatus(ctx, transactionID)
 }
 
 // GetFeeComponents the execution and data availability (L1Oracle) fees for the chain.
@@ -173,14 +186,14 @@ func (w *chainWriter) GetFeeComponents(ctx context.Context) (*commontypes.ChainF
 		return nil, fmt.Errorf("gas estimator not available")
 	}
 
-	fee, _, err := w.ge.GetFee(ctx, nil, 0, w.maxGasPrice)
+	fee, _, err := w.ge.GetFee(ctx, nil, 0, w.maxGasPrice, nil, nil)
 	if err != nil {
 		return nil, err
 	}
 	// Use legacy if no dynamic is available.
-	gasPrice := fee.Legacy.ToInt()
-	if fee.DynamicFeeCap != nil {
-		gasPrice = fee.DynamicFeeCap.ToInt()
+	gasPrice := fee.GasPrice.ToInt()
+	if fee.GasFeeCap != nil {
+		gasPrice = fee.GasFeeCap.ToInt()
 	}
 	if gasPrice == nil {
 		return nil, fmt.Errorf("dynamic fee and legacy gas price missing %+v", fee)

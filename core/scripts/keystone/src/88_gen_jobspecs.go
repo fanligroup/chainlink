@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	helpers "github.com/smartcontractkit/chainlink/core/scripts/common"
+	ksdeploy "github.com/smartcontractkit/chainlink/integration-tests/deployment/keystone"
 )
 
 type spec []string
@@ -34,12 +35,12 @@ func genSpecs(
 	ocrConfigContractAddress string,
 ) donHostSpec {
 	nodes := downloadNodeAPICredentials(nodeListPath)
-	nca := downloadNodePubKeys(chainID, pubkeysPath)
+	nca := downloadNodePubKeys(nodeListPath, chainID, pubkeysPath)
 	bootstrapNode := nca[0]
 
 	bootstrapSpecLines, err := readLines(filepath.Join(templatesDir, bootstrapSpecTemplate))
 	helpers.PanicErr(err)
-	bootHost := nodes[0].url.Host
+	bootHost := nodes[0].remoteURL.Hostname()
 	bootstrapSpecLines = replacePlaceholders(
 		bootstrapSpecLines,
 		chainID, p2pPort,
@@ -59,7 +60,7 @@ func genSpecs(
 			ocrConfigContractAddress, bootHost,
 			bootstrapNode, nca[i],
 		)
-		oracles = append(oracles, hostSpec{oracleSpecLines, nodes[i].url.Host})
+		oracles = append(oracles, hostSpec{oracleSpecLines, nodes[i].remoteURL.Host})
 	}
 
 	return donHostSpec{
@@ -73,7 +74,7 @@ func replacePlaceholders(
 
 	chainID, p2pPort int64,
 	contractAddress, bootHost string,
-	boot, node NodeKeys,
+	boot, node ksdeploy.NodeKeys,
 ) (output []string) {
 	chainIDStr := strconv.FormatInt(chainID, 10)
 	bootstrapper := fmt.Sprintf("%s@%s:%d", boot.P2PPeerID, bootHost, p2pPort)
@@ -82,6 +83,7 @@ func replacePlaceholders(
 		l = strings.Replace(l, "{{ ocr_config_contract_address }}", contractAddress, 1)
 		l = strings.Replace(l, "{{ transmitter_id }}", node.EthAddress, 1)
 		l = strings.Replace(l, "{{ ocr_key_bundle_id }}", node.OCR2BundleID, 1)
+		l = strings.Replace(l, "{{ aptos_key_bundle_id }}", node.AptosBundleID, 1)
 		l = strings.Replace(l, "{{ bootstrapper_p2p_id }}", bootstrapper, 1)
 		output = append(output, l)
 	}

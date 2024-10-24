@@ -1,13 +1,12 @@
 package types
 
-//go:generate mockery --quiet --name Subscription --output ./mocks/ --case=underscore
-
 // Subscription represents an event subscription where events are
 // delivered on a data channel.
 // This is a generic interface for Subscription to represent used by clients.
 type Subscription interface {
 	// Unsubscribe cancels the sending of events to the data channel
-	// and closes the error channel.
+	// and closes the error channel. Unsubscribe should be callable multiple
+	// times without causing an error.
 	Unsubscribe()
 	// Err returns the subscription error channel. The error channel receives
 	// a value if there is an issue with the subscription (e.g. the network connection

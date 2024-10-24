@@ -1,16 +1,15 @@
 package smoke
 
 import (
-	"log"
 	"testing"
 	"time"
 
-	ctf_client "github.com/smartcontractkit/chainlink-testing-framework/client"
+	ctf_client "github.com/smartcontractkit/chainlink-testing-framework/lib/client"
 
 	"github.com/pelletier/go-toml/v2"
 	"github.com/stretchr/testify/require"
 
-	"github.com/smartcontractkit/chainlink-testing-framework/logging"
+	"github.com/smartcontractkit/chainlink-testing-framework/lib/logging"
 	"github.com/smartcontractkit/chainlink/integration-tests/actions"
 	"github.com/smartcontractkit/chainlink/integration-tests/docker/test_env"
 	tc "github.com/smartcontractkit/chainlink/integration-tests/testconfig"
@@ -20,7 +19,7 @@ func TestReorgAboveFinality_FinalityTagDisabled(t *testing.T) {
 	t.Parallel()
 
 	l := logging.GetTestLogger(t)
-	config, err := tc.GetConfig(t.Name(), tc.LogPoller)
+	config, err := tc.GetConfig([]string{t.Name()}, tc.LogPoller)
 	require.NoError(t, err, "Error getting config")
 
 	privateNetworkConf, err := actions.EthereumNetworkConfigFromConfig(l, &config)
@@ -29,9 +28,7 @@ func TestReorgAboveFinality_FinalityTagDisabled(t *testing.T) {
 	// Get values from the node config
 	configMap := make(map[string]interface{})
 	err = toml.Unmarshal([]byte(config.NodeConfig.CommonChainConfigTOML), &configMap)
-	if err != nil {
-		log.Fatalf("Error unmarshaling TOML: %s", err)
-	}
+	require.NoError(t, err, "Error unmarshaling TOML")
 	nodeFinalityDepthInt, isFinalityDepthSet := configMap["FinalityDepth"].(int64)
 	nodeFinalityTagEnabled := configMap["FinalityTagEnabled"].(bool)
 	l.Info().Int64("nodeFinalityDepth", nodeFinalityDepthInt).Bool("nodeFinalityTagEnabled", nodeFinalityTagEnabled).Msg("Node reorg config")
@@ -50,12 +47,13 @@ func TestReorgAboveFinality_FinalityTagDisabled(t *testing.T) {
 		WithPrivateEthereumNetwork(privateNetworkConf.EthereumNetworkConfig).
 		WithCLNodes(6).
 		WithoutCleanup().
-		WithSeth().
 		Build()
 	require.NoError(t, err)
 
-	network := testEnv.EVMNetworks[0]
-	client := ctf_client.NewRPCClient(network.HTTPURLs[0])
+	evmNetwork, err := testEnv.GetFirstEvmNetwork()
+	require.NoError(t, err, "Error getting first evm network")
+
+	client := ctf_client.NewRPCClient(evmNetwork.HTTPURLs[0], nil)
 
 	// Wait for chain to progress
 	require.Eventually(t, func() bool {

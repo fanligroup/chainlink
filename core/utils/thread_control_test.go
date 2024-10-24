@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -35,9 +36,10 @@ func TestThreadControl_GoCtx(t *testing.T) {
 	var wg sync.WaitGroup
 	finished := atomic.Int32{}
 
-	timeout := 10 * time.Millisecond
+	timeout := 100 * time.Millisecond
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	start := time.Now()
+	ctx, cancel := context.WithDeadline(context.Background(), start.Add(timeout))
 	defer cancel()
 
 	wg.Add(1)
@@ -47,10 +49,9 @@ func TestThreadControl_GoCtx(t *testing.T) {
 		finished.Add(1)
 	})
 
-	start := time.Now()
 	wg.Wait()
-	end := time.Since(start)
-	require.True(t, end > timeout-1)
-	require.True(t, end < 2*timeout)
+	elapsed := time.Since(start)
+	assert.GreaterOrEqual(t, elapsed, timeout)
+	assert.Less(t, elapsed, 2*timeout)
 	require.Equal(t, int32(1), finished.Load())
 }

@@ -6,6 +6,7 @@ import (
 
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/smartcontractkit/libocr/networking/rageping"
 
 	ocrnetworking "github.com/smartcontractkit/libocr/networking"
 	ocr1types "github.com/smartcontractkit/libocr/offchainreporting/types"
@@ -54,6 +55,9 @@ type (
 
 		// OCR2 peer adapter
 		Peer2 *peerAdapterOCR2
+
+		// PeerGroupFactory can be used to create PeerGroup instances
+		PeerGroupFactory ocrnetworking.PeerGroupFactory
 	}
 )
 
@@ -101,6 +105,9 @@ func (p *SingletonPeerWrapper) Start(context.Context) error {
 			peer.OCR2BinaryNetworkEndpointFactory(),
 			peer.OCR2BootstrapperFactory(),
 		}
+
+		p.PeerGroupFactory = peer.PeerGroupFactory()
+
 		p.peerCloser = peer
 		return nil
 	})
@@ -135,7 +142,8 @@ func (p *SingletonPeerWrapper) peerConfig() (ocrnetworking.PeerConfig, error) {
 			IncomingMessageBufferSize: config.IncomingMessageBufferSize(),
 			OutgoingMessageBufferSize: config.OutgoingMessageBufferSize(),
 		},
-		MetricsRegisterer: prometheus.DefaultRegisterer,
+		MetricsRegisterer:            prometheus.DefaultRegisterer,
+		LatencyMetricsServiceConfigs: rageping.DefaultConfigs(),
 	}
 
 	return peerConfig, nil

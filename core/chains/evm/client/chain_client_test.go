@@ -21,16 +21,13 @@ import (
 	"github.com/ethereum/go-ethereum/rpc"
 	pkgerrors "github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/utils/tests"
 
 	commonclient "github.com/smartcontractkit/chainlink/v2/common/client"
-
 	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/client"
-	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/client/mocks"
 	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/testutils"
 	evmtypes "github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
 	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils"
@@ -328,7 +325,7 @@ func TestEthClient_HeaderByNumber(t *testing.T) {
 			`{"difficulty":"0xf3a00","extraData":"0xd883010503846765746887676f312e372e318664617277696e","gasLimit":"0xffc001","gasUsed":"0x0","hash":"0x41800b5c3f1717687d85fc9018faac0a6e90b39deaa0b99e7fe4fe796ddeb26a","logsBloom":"0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000","miner":"0xd1aeb42885a43b72b518182ef893125814811048","mixHash":"0x0f98b15f1a4901a7e9204f3c500a7bd527b3fb2c3340e12176a44b83e414a69e","nonce":"0x0ece08ea8c49dfd9","number":"0x1","parentHash":"0x41941023680923e0fe4d74a34bdac8141f2540e3ae90623718e47d66d1ca4a2d","receiptsRoot":"0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421","sha3Uncles":"0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347","size":"0x218","stateRoot":"0xc7b01007a10da045eacb90385887dd0c38fcb5db7393006bdde24b93873c334b","timestamp":"0x58318da2","totalDifficulty":"0x1f3a00","transactions":[],"transactionsRoot":"0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421","uncles":[]}`},
 		{"happy parity", expectedBlockNum, expectedBlockNum.Int64(), nil,
 			`{"author":"0xd1aeb42885a43b72b518182ef893125814811048","difficulty":"0xf3a00","extraData":"0xd883010503846765746887676f312e372e318664617277696e","gasLimit":"0xffc001","gasUsed":"0x0","hash":"0x41800b5c3f1717687d85fc9018faac0a6e90b39deaa0b99e7fe4fe796ddeb26a","logsBloom":"0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000","miner":"0xd1aeb42885a43b72b518182ef893125814811048","mixHash":"0x0f98b15f1a4901a7e9204f3c500a7bd527b3fb2c3340e12176a44b83e414a69e","nonce":"0x0ece08ea8c49dfd9","number":"0x1","parentHash":"0x41941023680923e0fe4d74a34bdac8141f2540e3ae90623718e47d66d1ca4a2d","receiptsRoot":"0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421","sealFields":["0xa00f98b15f1a4901a7e9204f3c500a7bd527b3fb2c3340e12176a44b83e414a69e","0x880ece08ea8c49dfd9"],"sha3Uncles":"0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347","size":"0x218","stateRoot":"0xc7b01007a10da045eacb90385887dd0c38fcb5db7393006bdde24b93873c334b","timestamp":"0x58318da2","totalDifficulty":"0x1f3a00","transactions":[],"transactionsRoot":"0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421","uncles":[]}`},
-		{"missing header", expectedBlockNum, 0, fmt.Errorf("no live nodes available for chain %s", testutils.FixtureChainID.String()),
+		{"missing header", expectedBlockNum, 0, fmt.Errorf("RPCClient returned error (eth-primary-rpc-0): not found"),
 			`null`},
 	}
 
@@ -366,7 +363,7 @@ func TestEthClient_HeaderByNumber(t *testing.T) {
 			ctx, cancel := context.WithTimeout(tests.Context(t), 5*time.Second)
 			result, err := ethClient.HeadByNumber(ctx, expectedBlockNum)
 			if test.error != nil {
-				require.Error(t, err, test.error)
+				require.EqualError(t, err, test.error.Error())
 			} else {
 				require.NoError(t, err)
 				require.Equal(t, expectedBlockHash, result.Hash.Hex())
@@ -449,6 +446,20 @@ func TestEthClient_SendTransaction_WithSecondaryURLs(t *testing.T) {
 	// Unfortunately it's a bit tricky to test this, since there is no
 	// synchronization. We have to rely on timing instead.
 	require.Eventually(t, func() bool { return service.sentCount.Load() == int32(2) }, tests.WaitTimeout(t), 500*time.Millisecond)
+}
+
+type sendTxService struct {
+	chainID   *big.Int
+	sentCount atomic.Int32
+}
+
+func (x *sendTxService) ChainID(ctx context.Context) (*hexutil.Big, error) {
+	return (*hexutil.Big)(x.chainID), nil
+}
+
+func (x *sendTxService) SendRawTransaction(ctx context.Context, signRawTx hexutil.Bytes) error {
+	x.sentCount.Add(1)
+	return nil
 }
 
 func TestEthClient_SendTransactionReturnCode(t *testing.T) {
@@ -691,20 +702,6 @@ func TestEthClient_SendTransactionReturnCode(t *testing.T) {
 	})
 }
 
-type sendTxService struct {
-	chainID   *big.Int
-	sentCount atomic.Int32
-}
-
-func (x *sendTxService) ChainId(ctx context.Context) (*hexutil.Big, error) {
-	return (*hexutil.Big)(x.chainID), nil
-}
-
-func (x *sendTxService) SendRawTransaction(ctx context.Context, signRawTx hexutil.Bytes) error {
-	x.sentCount.Add(1)
-	return nil
-}
-
 func TestEthClient_SubscribeNewHead(t *testing.T) {
 	t.Parallel()
 
@@ -729,8 +726,7 @@ func TestEthClient_SubscribeNewHead(t *testing.T) {
 	err := ethClient.Dial(tests.Context(t))
 	require.NoError(t, err)
 
-	headCh := make(chan *evmtypes.Head)
-	sub, err := ethClient.SubscribeNewHead(ctx, headCh)
+	headCh, sub, err := ethClient.SubscribeToHeads(ctx)
 	require.NoError(t, err)
 
 	select {
@@ -745,54 +741,49 @@ func TestEthClient_SubscribeNewHead(t *testing.T) {
 	sub.Unsubscribe()
 }
 
-func newMockRpc(t *testing.T) *mocks.RPCClient {
-	mockRpc := mocks.NewRPCClient(t)
-	mockRpc.On("Dial", mock.Anything).Return(nil).Once()
-	mockRpc.On("Close").Return(nil).Once()
-	mockRpc.On("ChainID", mock.Anything).Return(testutils.FixtureChainID, nil).Once()
-	// node does not always manage to fully setup aliveLoop, so we have to make calls optional to avoid flakes
-	mockRpc.On("Subscribe", mock.Anything, mock.Anything, mock.Anything).Return(client.NewMockSubscription(), nil).Maybe()
-	mockRpc.On("SetAliveLoopSub", mock.Anything).Return().Maybe()
-	return mockRpc
-}
-
-func TestChainClient_BatchCallContext(t *testing.T) {
+func TestEthClient_BatchCallContext(t *testing.T) {
 	t.Parallel()
 
 	t.Run("batch requests return errors", func(t *testing.T) {
-		ctx := tests.Context(t)
 		rpcError := errors.New("something went wrong")
-		blockNumResp := ""
-		blockNum := hexutil.EncodeBig(big.NewInt(42))
 		b := []rpc.BatchElem{
 			{
-				Method: "eth_getBlockByNumber",
-				Args:   []interface{}{blockNum, true},
-				Result: &types.Block{},
+				Method: "eth_call",
+				Args:   []interface{}{0},
+				Result: "",
 			},
 			{
-				Method: "eth_blockNumber",
-				Result: &blockNumResp,
+				Method: "eth_call",
+				Args:   []interface{}{1},
+				Result: "",
 			},
 		}
 
-		mockRpc := newMockRpc(t)
-		mockRpc.On("BatchCallContext", mock.Anything, b).Run(func(args mock.Arguments) {
-			reqs := args.Get(1).([]rpc.BatchElem)
-			for i := 0; i < len(reqs); i++ {
-				elem := &reqs[i]
-				elem.Error = rpcError
+		wsURL := testutils.NewWSServer(t, testutils.FixtureChainID, func(method string, params gjson.Result) (resp testutils.JSONRPCResponse) {
+			switch method {
+			case "eth_subscribe":
+				resp.Result = `"0x00"`
+				resp.Notify = headResult
+				return
+			case "eth_unsubscribe":
+				resp.Result = "true"
+				return
 			}
-		}).Return(nil).Once()
+			require.Equal(t, "eth_call", method)
+			resp.Error.Code = -1
+			resp.Error.Message = rpcError.Error()
+			resp.Result = ""
+			return
+		}).WSURL().String()
 
-		client := client.NewChainClientWithMockedRpc(t, commonclient.NodeSelectionModeRoundRobin, time.Second*0, time.Second*0, testutils.FixtureChainID, mockRpc)
-		err := client.Dial(ctx)
+		ethClient := mustNewChainClient(t, wsURL)
+		err := ethClient.Dial(tests.Context(t))
 		require.NoError(t, err)
 
-		err = client.BatchCallContext(ctx, b)
+		err = ethClient.BatchCallContext(context.Background(), b)
 		require.NoError(t, err)
 		for _, elem := range b {
-			require.ErrorIs(t, rpcError, elem.Error)
+			require.Equal(t, elem.Error.Error(), rpcError.Error())
 		}
 	})
 }
@@ -825,11 +816,8 @@ func TestEthClient_ErroringClient(t *testing.T) {
 	_, err = erroringClient.CallContract(ctx, ethereum.CallMsg{}, nil)
 	require.Equal(t, err, commonclient.ErroringNodeError)
 
-	// TODO-1663: test actual ChainID() call once client.go is deprecated.
-	id, err := erroringClient.ChainID()
-	require.Equal(t, id, testutils.FixtureChainID)
-	//require.Equal(t, err, commonclient.ErroringNodeError)
-	require.Equal(t, err, nil)
+	id := erroringClient.ConfiguredChainID()
+	require.Equal(t, id, big.NewInt(0))
 
 	_, err = erroringClient.CodeAt(ctx, common.Address{}, nil)
 	require.Equal(t, err, commonclient.ErroringNodeError)
@@ -870,20 +858,22 @@ func TestEthClient_ErroringClient(t *testing.T) {
 	_, err = erroringClient.PendingNonceAt(ctx, common.Address{})
 	require.Equal(t, err, commonclient.ErroringNodeError)
 
+	txSenderNotStarted := errors.New("TransactionSender not started")
 	err = erroringClient.SendTransaction(ctx, nil)
-	require.Equal(t, err, commonclient.ErroringNodeError)
+	require.Equal(t, err, txSenderNotStarted)
 
-	code, err := erroringClient.SendTransactionReturnCode(ctx, nil, common.Address{})
+	tx := testutils.NewLegacyTransaction(uint64(42), testutils.NewAddress(), big.NewInt(142), 242, big.NewInt(342), []byte{1, 2, 3})
+	code, err := erroringClient.SendTransactionReturnCode(ctx, tx, common.Address{})
 	require.Equal(t, code, commonclient.Unknown)
-	require.Equal(t, err, commonclient.ErroringNodeError)
+	require.Equal(t, err, txSenderNotStarted)
 
-	_, err = erroringClient.SequenceAt(ctx, common.Address{}, nil)
+	_, err = erroringClient.NonceAt(ctx, common.Address{}, nil)
 	require.Equal(t, err, commonclient.ErroringNodeError)
 
 	_, err = erroringClient.SubscribeFilterLogs(ctx, ethereum.FilterQuery{}, nil)
 	require.Equal(t, err, commonclient.ErroringNodeError)
 
-	_, err = erroringClient.SubscribeNewHead(ctx, nil)
+	_, _, err = erroringClient.SubscribeToHeads(ctx)
 	require.Equal(t, err, commonclient.ErroringNodeError)
 
 	_, err = erroringClient.SuggestGasPrice(ctx)

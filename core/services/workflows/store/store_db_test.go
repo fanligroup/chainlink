@@ -12,7 +12,9 @@ import (
 
 	"github.com/smartcontractkit/chainlink-common/pkg/utils/tests"
 	"github.com/smartcontractkit/chainlink-common/pkg/values"
+
 	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils/pgtest"
+	"github.com/smartcontractkit/chainlink/v2/core/logger"
 )
 
 func randomID() string {
@@ -24,9 +26,13 @@ func randomID() string {
 	return hex.EncodeToString(b)
 }
 
-func Test_StoreDB(t *testing.T) {
+func newTestDBStore(t *testing.T) *DBStore {
 	db := pgtest.NewSqlxDB(t)
-	store := &DBStore{db: db, clock: clockwork.NewFakeClock()}
+	return &DBStore{db: db, lggr: logger.TestLogger(t), clock: clockwork.NewFakeClock()}
+}
+
+func Test_StoreDB(t *testing.T) {
+	store := newTestDBStore(t)
 
 	id := randomID()
 	es := WorkflowExecution{
@@ -46,7 +52,7 @@ func Test_StoreDB(t *testing.T) {
 		Status:      StatusStarted,
 	}
 
-	err := store.Add(tests.Context(t), &es)
+	_, err := store.Add(tests.Context(t), &es)
 	require.NoError(t, err)
 
 	gotEs, err := store.Get(tests.Context(t), es.ExecutionID)
@@ -58,8 +64,7 @@ func Test_StoreDB(t *testing.T) {
 }
 
 func Test_StoreDB_DuplicateEntry(t *testing.T) {
-	db := pgtest.NewSqlxDB(t)
-	store := &DBStore{db: db, clock: clockwork.NewFakeClock()}
+	store := newTestDBStore(t)
 
 	id := randomID()
 	es := WorkflowExecution{
@@ -79,16 +84,15 @@ func Test_StoreDB_DuplicateEntry(t *testing.T) {
 		Status:      StatusStarted,
 	}
 
-	err := store.Add(tests.Context(t), &es)
+	_, err := store.Add(tests.Context(t), &es)
 	require.NoError(t, err)
 
-	err = store.Add(tests.Context(t), &es)
+	_, err = store.Add(tests.Context(t), &es)
 	assert.ErrorContains(t, err, "duplicate key value violates")
 }
 
 func Test_StoreDB_UpdateStatus(t *testing.T) {
-	db := pgtest.NewSqlxDB(t)
-	store := &DBStore{db: db, clock: clockwork.NewFakeClock()}
+	store := newTestDBStore(t)
 
 	id := randomID()
 	es := WorkflowExecution{
@@ -108,7 +112,7 @@ func Test_StoreDB_UpdateStatus(t *testing.T) {
 		Status:      StatusStarted,
 	}
 
-	err := store.Add(tests.Context(t), &es)
+	_, err := store.Add(tests.Context(t), &es)
 	require.NoError(t, err)
 
 	completedStatus := StatusCompleted
@@ -122,8 +126,7 @@ func Test_StoreDB_UpdateStatus(t *testing.T) {
 }
 
 func Test_StoreDB_UpdateStep(t *testing.T) {
-	db := pgtest.NewSqlxDB(t)
-	store := &DBStore{db: db, clock: clockwork.NewFakeClock()}
+	store := newTestDBStore(t)
 
 	id := randomID()
 	stepOne := &WorkflowExecutionStep{
@@ -145,7 +148,7 @@ func Test_StoreDB_UpdateStep(t *testing.T) {
 		Status:      StatusStarted,
 	}
 
-	err := store.Add(tests.Context(t), &es)
+	_, err := store.Add(tests.Context(t), &es)
 	require.NoError(t, err)
 
 	stepOne.Status = StatusCompleted
@@ -170,8 +173,7 @@ func Test_StoreDB_UpdateStep(t *testing.T) {
 }
 
 func Test_StoreDB_WorkflowStatus(t *testing.T) {
-	db := pgtest.NewSqlxDB(t)
-	store := &DBStore{db: db, clock: clockwork.NewFakeClock()}
+	store := newTestDBStore(t)
 
 	for s := range ValidStatuses {
 		id := randomID()
@@ -194,14 +196,13 @@ func Test_StoreDB_WorkflowStatus(t *testing.T) {
 			Status:      s,
 		}
 
-		err := store.Add(tests.Context(t), &es)
+		_, err := store.Add(tests.Context(t), &es)
 		require.NoError(t, err)
 	}
 }
 
 func Test_StoreDB_WorkflowStepStatus(t *testing.T) {
-	db := pgtest.NewSqlxDB(t)
-	store := &DBStore{db: db, clock: clockwork.NewFakeClock()}
+	store := newTestDBStore(t)
 
 	id := randomID()
 	stepOne := &WorkflowExecutionStep{
@@ -223,7 +224,7 @@ func Test_StoreDB_WorkflowStepStatus(t *testing.T) {
 		Status:      StatusStarted,
 	}
 
-	err := store.Add(tests.Context(t), &es)
+	_, err := store.Add(tests.Context(t), &es)
 	require.NoError(t, err)
 
 	for s := range ValidStatuses {
@@ -234,8 +235,7 @@ func Test_StoreDB_WorkflowStepStatus(t *testing.T) {
 }
 
 func Test_StoreDB_GetUnfinishedSteps(t *testing.T) {
-	db := pgtest.NewSqlxDB(t)
-	store := &DBStore{db: db, clock: clockwork.NewFakeClock()}
+	store := newTestDBStore(t)
 
 	id := randomID()
 	stepOne := &WorkflowExecutionStep{
@@ -257,7 +257,7 @@ func Test_StoreDB_GetUnfinishedSteps(t *testing.T) {
 		Status:      StatusStarted,
 	}
 
-	err := store.Add(tests.Context(t), &es)
+	_, err := store.Add(tests.Context(t), &es)
 	require.NoError(t, err)
 
 	id = randomID()
@@ -266,7 +266,7 @@ func Test_StoreDB_GetUnfinishedSteps(t *testing.T) {
 		Status:      StatusCompleted,
 		Steps:       map[string]*WorkflowExecutionStep{},
 	}
-	err = store.Add(tests.Context(t), &esTwo)
+	_, err = store.Add(tests.Context(t), &esTwo)
 	require.NoError(t, err)
 
 	states, err := store.GetUnfinished(tests.Context(t), 0, 100)

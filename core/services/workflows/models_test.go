@@ -7,6 +7,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smartcontractkit/chainlink-common/pkg/workflows"
+
+	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
+	"github.com/smartcontractkit/chainlink/v2/core/services/job"
 )
 
 func TestParse_Graph(t *testing.T) {
@@ -214,7 +217,7 @@ targets:
 			},
 		},
 		{
-			name: "non-trigger step with no dependent refs",
+			name: "invalid refs",
 			yaml: `
 triggers:
   - id: "a-trigger@1.0.0"
@@ -241,7 +244,7 @@ targets:
     inputs:
       consensus_output: $(a-consensus.outputs)
 `,
-			errMsg: "all non-trigger steps must have a dependent ref",
+			errMsg: "invalid refs",
 		},
 		{
 			name: "duplicate edge declarations",
@@ -290,7 +293,10 @@ targets:
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(st *testing.T) {
-			wf, err := Parse(tc.yaml)
+			spec, _, _, err := job.YAMLSpecFactory{}.Spec(testutils.Context(t), tc.yaml, "")
+			require.NoError(t, err)
+
+			wf, err := Parse(spec)
 			if tc.errMsg != "" {
 				assert.ErrorContains(st, err, tc.errMsg)
 			} else {
@@ -316,7 +322,10 @@ targets:
 }
 
 func TestParsesIntsCorrectly(t *testing.T) {
-	wf, err := Parse(hardcodedWorkflow)
+	spec, _, _, err := job.YAMLSpecFactory{}.Spec(testutils.Context(t), hardcodedWorkflow, "")
+	require.NoError(t, err)
+
+	wf, err := Parse(spec)
 	require.NoError(t, err)
 
 	n, err := wf.Vertex("evm_median")

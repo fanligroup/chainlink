@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"math/rand"
 	"sort"
 	"strings"
 	"sync"
@@ -24,15 +25,16 @@ import (
 
 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
 	"github.com/smartcontractkit/chainlink-common/pkg/services"
+	"github.com/smartcontractkit/chainlink-common/pkg/timeutil"
 	"github.com/smartcontractkit/chainlink-common/pkg/types/query"
-	"github.com/smartcontractkit/chainlink-common/pkg/utils"
 	"github.com/smartcontractkit/chainlink-common/pkg/utils/mathutil"
+
 	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/client"
+	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/config"
 	evmtypes "github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
 	ubig "github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils/big"
 )
 
-//go:generate mockery --quiet --name LogPoller --output ./mocks/ --case=underscore --structname LogPoller --filename log_poller.go
 type LogPoller interface {
 	services.Service
 	Healthy() error
@@ -68,7 +70,7 @@ type LogPoller interface {
 	LogsDataWordBetween(ctx context.Context, eventSig common.Hash, address common.Address, wordIndexMin, wordIndexMax int, wordValue common.Hash, confs evmtypes.Confirmations) ([]Log, error)
 
 	// chainlink-common query filtering
-	FilteredLogs(ctx context.Context, filter query.KeyFilter, limitAndSort query.LimitAndSort, queryName string) ([]Log, error)
+	FilteredLogs(ctx context.Context, filter []query.Expression, limitAndSort query.LimitAndSort, queryName string) ([]Log, error)
 }
 
 type LogPollerTest interface {
@@ -88,6 +90,10 @@ type Client interface {
 	ConfiguredChainID() *big.Int
 }
 
+type HeadTracker interface {
+	LatestAndFinalizedBlock(ctx context.Context) (latest, finalized *evmtypes.Head, err error)
+}
+
 var (
 	_                       LogPollerTest = &logPoller{}
 	ErrReplayRequestAborted               = pkgerrors.New("aborted, replay request cancelled")
@@ -100,6 +106,7 @@ type logPoller struct {
 	services.StateMachine
 	ec                       Client
 	orm                      ORM
+	headTracker              HeadTracker
 	lggr                     logger.SugaredLogger
 	pollPeriod               time.Duration // poll period set by block production rate
 	useFinalityTag           bool          // indicates whether logPoller should use chain's finality or pick a fixed depth for finality
@@ -108,6 +115,7 @@ type logPoller struct {
 	backfillBatchSize        int64         // batch size to use when backfilling finalized logs
 	rpcBatchSize             int64         // batch size to use for fallback RPC calls made in GetBlocks
 	logPrunePageSize         int64
+	clientErrors             config.ClientErrors
 	backupPollerNextBlock    int64 // next block to be processed by Backup LogPoller
 	backupPollerBlockDelay   int64 // how far behind regular LogPoller should BackupLogPoller run. 0 = disabled
 
@@ -126,7 +134,8 @@ type logPoller struct {
 	// Usually the only way to recover is to manually remove the offending logs and block from the database.
 	// LogPoller keeps running in infinite loop, so whenever the invalid state is removed from the database it should
 	// recover automatically without needing to restart the LogPoller.
-	finalityViolated *atomic.Bool
+	finalityViolated           atomic.Bool
+	countBasedLogPruningActive atomic.Bool
 }
 
 type Opts struct {
@@ -138,6 +147,7 @@ type Opts struct {
 	KeepFinalizedBlocksDepth int64
 	BackupPollerBlockDelay   int64
 	LogPrunePageSize         int64
+	ClientErrors             config.ClientErrors
 }
 
 // NewLogPoller creates a log poller. Note there is an assumption
@@ -150,11 +160,12 @@ type Opts struct {
 //
 // How fast that can be done depends largely on network speed and DB, but even for the fastest
 // support chain, polygon, which has 2s block times, we need RPCs roughly with <= 500ms latency
-func NewLogPoller(orm ORM, ec Client, lggr logger.Logger, opts Opts) *logPoller {
+func NewLogPoller(orm ORM, ec Client, lggr logger.Logger, headTracker HeadTracker, opts Opts) *logPoller {
 	return &logPoller{
 		stopCh:                   make(chan struct{}),
 		ec:                       ec,
 		orm:                      orm,
+		headTracker:              headTracker,
 		lggr:                     logger.Sugared(logger.Named(lggr, "LogPoller")),
 		replayStart:              make(chan int64),
 		replayComplete:           make(chan error),
@@ -166,9 +177,9 @@ func NewLogPoller(orm ORM, ec Client, lggr logger.Logger, opts Opts) *logPoller 
 		rpcBatchSize:             opts.RpcBatchSize,
 		keepFinalizedBlocksDepth: opts.KeepFinalizedBlocksDepth,
 		logPrunePageSize:         opts.LogPrunePageSize,
+		clientErrors:             opts.ClientErrors,
 		filters:                  make(map[string]Filter),
 		filterDirty:              true, // Always build Filter on first call to cache an empty filter if nothing registered yet.
-		finalityViolated:         new(atomic.Bool),
 	}
 }
 
@@ -205,6 +216,12 @@ func FilterName(id string, args ...any) string {
 func (filter *Filter) Contains(other *Filter) bool {
 	if other == nil {
 		return true
+	}
+	if other.Retention != filter.Retention {
+		return false
+	}
+	if other.MaxLogsKept != filter.MaxLogsKept {
+		return false
 	}
 	addresses := make(map[common.Address]interface{})
 	for _, addr := range filter.Addresses {
@@ -271,7 +288,7 @@ func (lp *logPoller) RegisterFilter(ctx context.Context, filter Filter) error {
 			lp.lggr.Warnw("Filter already present, no-op", "name", filter.Name, "filter", filter)
 			return nil
 		}
-		lp.lggr.Warnw("Updating existing filter with more events or addresses", "name", filter.Name, "filter", filter)
+		lp.lggr.Warnw("Updating existing filter", "name", filter.Name, "filter", filter)
 	}
 
 	if err := lp.orm.InsertFilter(ctx, filter); err != nil {
@@ -279,6 +296,9 @@ func (lp *logPoller) RegisterFilter(ctx context.Context, filter Filter) error {
 	}
 	lp.filters[filter.Name] = filter
 	lp.filterDirty = true
+	if filter.MaxLogsKept > 0 {
+		lp.countBasedLogPruningActive.Store(true)
+	}
 	return nil
 }
 
@@ -534,27 +554,61 @@ func (lp *logPoller) GetReplayFromBlock(ctx context.Context, requested int64) (i
 	return mathutil.Min(requested, lastProcessed.BlockNumber), nil
 }
 
+// loadFilters loads the filters from db, and activates count-based Log Pruning
+// if required by any of the filters
 func (lp *logPoller) loadFilters(ctx context.Context) error {
-	lp.filterMu.Lock()
-	defer lp.filterMu.Unlock()
-	filters, err := lp.orm.LoadFilters(ctx)
-
+	filters, err := lp.lockAndLoadFilters(ctx)
 	if err != nil {
 		return pkgerrors.Wrapf(err, "Failed to load initial filters from db, retrying")
+	}
+	if lp.countBasedLogPruningActive.Load() {
+		return nil
+	}
+	for _, filter := range filters {
+		if filter.MaxLogsKept != 0 {
+			lp.countBasedLogPruningActive.Store(true)
+			return nil
+		}
+	}
+	return nil
+}
+
+// lockAndLoadFilters is the part of loadFilters() requiring a filterMu lock
+func (lp *logPoller) lockAndLoadFilters(ctx context.Context) (filters map[string]Filter, err error) {
+	lp.filterMu.Lock()
+	defer lp.filterMu.Unlock()
+
+	filters, err = lp.orm.LoadFilters(ctx)
+	if err != nil {
+		return filters, err
 	}
 
 	lp.filters = filters
 	lp.filterDirty = true
-	return nil
+	return filters, nil
+}
+
+// tickStaggeredDelay chooses a uniformly random amount of time to delay between minDelay and minDelay + period
+func tickStaggeredDelay(minDelay time.Duration, period time.Duration) <-chan time.Time {
+	return time.After(minDelay + timeutil.JitterPct(1.0).Apply(period/2))
+}
+
+func tickWithDefaultJitter(interval time.Duration) <-chan time.Time {
+	return time.After(services.DefaultJitter.Apply(interval))
 }
 
 func (lp *logPoller) run() {
 	defer lp.wg.Done()
 	ctx, cancel := lp.stopCh.NewCtx()
 	defer cancel()
-	logPollTick := time.After(0)
+	logPollTicker := services.NewTicker(lp.pollPeriod)
+	defer logPollTicker.Stop()
 	// stagger these somewhat, so they don't all run back-to-back
-	backupLogPollTick := time.After(100 * time.Millisecond)
+	backupLogPollTicker := services.TickerConfig{
+		Initial:   100 * time.Millisecond,
+		JitterPct: services.DefaultJitter,
+	}.NewTicker(time.Duration(lp.backupPollerBlockDelay) * lp.pollPeriod)
+	defer backupLogPollTicker.Stop()
 	filtersLoaded := false
 
 	for {
@@ -563,8 +617,7 @@ func (lp *logPoller) run() {
 			return
 		case fromBlockReq := <-lp.replayStart:
 			lp.handleReplayRequest(ctx, fromBlockReq, filtersLoaded)
-		case <-logPollTick:
-			logPollTick = time.After(utils.WithJitter(lp.pollPeriod))
+		case <-logPollTicker.C:
 			if !filtersLoaded {
 				if err := lp.loadFilters(ctx); err != nil {
 					lp.lggr.Errorw("Failed loading filters in main logpoller loop, retrying later", "err", err)
@@ -584,16 +637,9 @@ func (lp *logPoller) run() {
 				}
 				// Otherwise this is the first poll _ever_ on a new chain.
 				// Only safe thing to do is to start at the first finalized block.
-				latestBlock, latestFinalizedBlockNumber, err := lp.latestBlocks(ctx)
+				_, latestFinalizedBlockNumber, err := lp.latestBlocks(ctx)
 				if err != nil {
 					lp.lggr.Warnw("Unable to get latest for first poll", "err", err)
-					continue
-				}
-				// Do not support polling chains which don't even have finality depth worth of blocks.
-				// Could conceivably support this but not worth the effort.
-				// Need last finalized block number to be higher than 0
-				if latestFinalizedBlockNumber <= 0 {
-					lp.lggr.Warnw("Insufficient number of blocks on chain, waiting for finality depth", "err", err, "latest", latestBlock.Number)
 					continue
 				}
 				// Starting at the first finalized block. We do not backfill the first finalized block.
@@ -602,7 +648,7 @@ func (lp *logPoller) run() {
 				start = lastProcessed.BlockNumber + 1
 			}
 			lp.PollAndSaveLogs(ctx, start)
-		case <-backupLogPollTick:
+		case <-backupLogPollTicker.C:
 			if lp.backupPollerBlockDelay == 0 {
 				continue // backup poller is disabled
 			}
@@ -614,7 +660,6 @@ func (lp *logPoller) run() {
 			// frequently than the primary log poller (instead of roughly once per block it runs once roughly once every
 			// lp.backupPollerDelay blocks--with default settings about 100x less frequently).
 
-			backupLogPollTick = time.After(utils.WithJitter(time.Duration(lp.backupPollerBlockDelay) * lp.pollPeriod))
 			if !filtersLoaded {
 				lp.lggr.Warnw("Backup log poller ran before filters loaded, skipping")
 				continue
@@ -629,31 +674,62 @@ func (lp *logPoller) backgroundWorkerRun() {
 	ctx, cancel := lp.stopCh.NewCtx()
 	defer cancel()
 
+	blockPruneShortInterval := lp.pollPeriod * 100
+	blockPruneInterval := blockPruneShortInterval * 10
+	logPruneShortInterval := lp.pollPeriod * 241 // no common factors with 100
+	logPruneInterval := logPruneShortInterval * 10
+
 	// Avoid putting too much pressure on the database by staggering the pruning of old blocks and logs.
 	// Usually, node after restart will have some work to boot the plugins and other services.
-	// Deferring first prune by minutes reduces risk of putting too much pressure on the database.
-	blockPruneTick := time.After(5 * time.Minute)
-	logPruneTick := time.After(10 * time.Minute)
+	// Deferring first prune by at least 5 mins reduces risk of putting too much pressure on the database.
+	blockPruneTick := tickStaggeredDelay(5*time.Minute, blockPruneInterval)
+	logPruneTick := tickStaggeredDelay(5*time.Minute, logPruneInterval)
+
+	// Start initial prune of unmatched logs after 5-15 successful expired log prunes, so that not all chains start
+	// around the same time. After that, every 20 successful expired log prunes.
+	successfulExpiredLogPrunes := 5 + rand.Intn(10) //nolint:gosec
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-blockPruneTick:
-			blockPruneTick = time.After(utils.WithJitter(lp.pollPeriod * 1000))
+			lp.lggr.Infow("pruning old blocks")
+			blockPruneTick = tickWithDefaultJitter(blockPruneInterval)
 			if allRemoved, err := lp.PruneOldBlocks(ctx); err != nil {
-				lp.lggr.Errorw("Unable to prune old blocks", "err", err)
+				lp.lggr.Errorw("unable to prune old blocks", "err", err)
 			} else if !allRemoved {
 				// Tick faster when cleanup can't keep up with the pace of new blocks
-				blockPruneTick = time.After(utils.WithJitter(lp.pollPeriod * 100))
+				blockPruneTick = tickWithDefaultJitter(blockPruneShortInterval)
+				lp.lggr.Warnw("reached page limit while pruning old blocks")
+			} else {
+				lp.lggr.Debugw("finished pruning old blocks")
 			}
 		case <-logPruneTick:
-			logPruneTick = time.After(utils.WithJitter(lp.pollPeriod * 2401)) // = 7^5 avoids common factors with 1000
+			logPruneTick = tickWithDefaultJitter(logPruneInterval)
+			lp.lggr.Infof("pruning expired logs")
 			if allRemoved, err := lp.PruneExpiredLogs(ctx); err != nil {
-				lp.lggr.Errorw("Unable to prune expired logs", "err", err)
+				lp.lggr.Errorw("unable to prune expired logs", "err", err)
 			} else if !allRemoved {
+				lp.lggr.Warnw("reached page limit while pruning expired logs")
 				// Tick faster when cleanup can't keep up with the pace of new logs
-				logPruneTick = time.After(utils.WithJitter(lp.pollPeriod * 241))
+				logPruneTick = tickWithDefaultJitter(logPruneShortInterval)
+			} else if successfulExpiredLogPrunes >= 20 {
+				// Only prune unmatched logs if we've successfully pruned all expired logs at least 20 times
+				// since the last time unmatched logs were pruned
+				lp.lggr.Infof("finished pruning expired logs: pruning unmatched logs")
+				if allRemoved, err := lp.PruneUnmatchedLogs(ctx); err != nil {
+					lp.lggr.Errorw("unable to prune unmatched logs", "err", err)
+				} else if !allRemoved {
+					lp.lggr.Warnw("reached page limit while pruning unmatched logs")
+					logPruneTick = tickWithDefaultJitter(logPruneShortInterval)
+				} else {
+					lp.lggr.Debugw("finished pruning unmatched logs")
+					successfulExpiredLogPrunes = 0
+				}
+			} else {
+				lp.lggr.Debugw("finished pruning expired logs")
+				successfulExpiredLogPrunes++
 			}
 		}
 	}
@@ -785,8 +861,6 @@ func (lp *logPoller) blocksFromLogs(ctx context.Context, logs []types.Log, endBl
 	return lp.GetBlocksRange(ctx, numbers)
 }
 
-const jsonRpcLimitExceeded = -32005 // See https://github.com/ethereum/EIPs/blob/master/EIPS/eip-1474.md
-
 // backfill will query FilterLogs in batches for logs in the
 // block range [start, end] and save them to the db.
 // Retries until ctx cancelled. Will return an error if cancelled
@@ -798,13 +872,11 @@ func (lp *logPoller) backfill(ctx context.Context, start, end int64) error {
 
 		gethLogs, err := lp.ec.FilterLogs(ctx, lp.Filter(big.NewInt(from), big.NewInt(to), nil))
 		if err != nil {
-			var rpcErr client.JsonError
-			if pkgerrors.As(err, &rpcErr) {
-				if rpcErr.Code != jsonRpcLimitExceeded {
-					lp.lggr.Errorw("Unable to query for logs", "err", err, "from", from, "to", to)
-					return err
-				}
+			if !client.IsTooManyResults(err, lp.clientErrors) {
+				lp.lggr.Errorw("Unable to query for logs", "err", err, "from", from, "to", to)
+				return err
 			}
+
 			if batchSize == 1 {
 				lp.lggr.Criticalw("Too many log results in a single block, failed to retrieve logs! Node may be running in a degraded state.", "err", err, "from", from, "to", to, "LogBackfillBatchSize", lp.backfillBatchSize)
 				return err
@@ -863,7 +935,7 @@ func (lp *logPoller) getCurrentBlockMaybeHandleReorg(ctx context.Context, curren
 		}
 		// Additional sanity checks, don't necessarily trust the RPC.
 		if currentBlock == nil {
-			lp.lggr.Errorf("Unexpected nil block from RPC", "currentBlockNumber", currentBlockNumber)
+			lp.lggr.Errorw("Unexpected nil block from RPC", "currentBlockNumber", currentBlockNumber)
 			return nil, pkgerrors.Errorf("Got nil block for %d", currentBlockNumber)
 		}
 		if currentBlock.Number != currentBlockNumber {
@@ -1007,33 +1079,23 @@ func (lp *logPoller) PollAndSaveLogs(ctx context.Context, currentBlockNumber int
 	}
 }
 
-// Returns information about latestBlock, latestFinalizedBlockNumber
-// If finality tag is not enabled, latestFinalizedBlockNumber is calculated as latestBlockNumber - lp.finalityDepth (configured param)
-// Otherwise, we return last finalized block number returned from chain
+// Returns information about latestBlock, latestFinalizedBlockNumber provided by HeadTracker
 func (lp *logPoller) latestBlocks(ctx context.Context) (*evmtypes.Head, int64, error) {
-	// If finality is not enabled, we can only fetch the latest block
-	if !lp.useFinalityTag {
-		// Example:
-		// finalityDepth = 2
-		// Blocks: 1->2->3->4->5(latestBlock)
-		// latestFinalizedBlockNumber would be 3
-		latestBlock, err := lp.ec.HeadByNumber(ctx, nil)
-		if err != nil {
-			return nil, 0, err
-		}
-		// If chain has fewer blocks than finalityDepth, return 0
-		return latestBlock, mathutil.Max(latestBlock.Number-lp.finalityDepth, 0), nil
+	latest, finalized, err := lp.headTracker.LatestAndFinalizedBlock(ctx)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to get latest and latest finalized block from HeadTracker: %w", err)
 	}
 
-	// If finality is enabled, we need to get the latest and finalized blocks.
-	blocks, err := lp.batchFetchBlocks(ctx, []string{rpc.LatestBlockNumber.String(), rpc.FinalizedBlockNumber.String()}, 2)
-	if err != nil {
-		return nil, 0, err
+	finalizedBN := finalized.BlockNumber()
+	// This is a dirty trick that allows LogPoller to function properly in tests where chain needs significant time to
+	// reach finality depth. An alternative to this one-liner is a database migration that drops restriction
+	// LogPollerBlock.FinalizedBlockNumber > 0 (which we actually want to keep to spot cases when FinalizedBlockNumber was simply not populated)
+	// and refactoring of queries that assume that restriction still holds.
+	if finalizedBN == 0 {
+		finalizedBN = 1
 	}
-	latest := blocks[0]
-	finalized := blocks[1]
-	lp.lggr.Debugw("Latest blocks read from chain", "latest", latest.Number, "finalized", finalized.Number)
-	return latest, finalized.Number, nil
+	lp.lggr.Debugw("Latest blocks read from chain", "latest", latest.Number, "finalized", finalizedBN)
+	return latest, finalizedBN, nil
 }
 
 // Find the first place where our chain and their chain have the same block,
@@ -1045,7 +1107,7 @@ func (lp *logPoller) findBlockAfterLCA(ctx context.Context, current *evmtypes.He
 	if err != nil {
 		return nil, err
 	}
-	blockAfterLCA := *current
+	blockAfterLCA := current
 	// We expect reorgs up to the block after latestFinalizedBlock
 	// We loop via parent instead of current so current always holds the LCA+1.
 	// If the parent block number becomes < the first finalized block our reorg is too deep.
@@ -1057,10 +1119,10 @@ func (lp *logPoller) findBlockAfterLCA(ctx context.Context, current *evmtypes.He
 		}
 		if parent.Hash == ourParentBlockHash.BlockHash {
 			// If we do have the blockhash, return blockAfterLCA
-			return &blockAfterLCA, nil
+			return blockAfterLCA, nil
 		}
 		// Otherwise get a new parent and update blockAfterLCA.
-		blockAfterLCA = *parent
+		blockAfterLCA = parent
 		parent, err = lp.ec.HeadByHash(ctx, parent.ParentHash)
 		if err != nil {
 			return nil, err
@@ -1074,7 +1136,8 @@ func (lp *logPoller) findBlockAfterLCA(ctx context.Context, current *evmtypes.He
 }
 
 // PruneOldBlocks removes blocks that are > lp.keepFinalizedBlocksDepth behind the latest finalized block.
-// Returns whether all blocks eligible for pruning were removed. If logPrunePageSize is set to 0, it will always return true.
+// Returns whether all blocks eligible for pruning were removed. If logPrunePageSize is set to 0, then it
+// will always return true unless there is an actual error.
 func (lp *logPoller) PruneOldBlocks(ctx context.Context) (bool, error) {
 	latestBlock, err := lp.orm.SelectLatestBlock(ctx)
 	if err != nil {
@@ -1098,10 +1161,46 @@ func (lp *logPoller) PruneOldBlocks(ctx context.Context) (bool, error) {
 	return lp.logPrunePageSize == 0 || rowsRemoved < lp.logPrunePageSize, err
 }
 
-// PruneExpiredLogs logs that are older than their retention period defined in Filter.
-// Returns whether all logs eligible for pruning were removed. If logPrunePageSize is set to 0, it will always return true.
+// PruneExpiredLogs will attempt to remove any logs which have passed their retention period. Returns whether all expired
+// logs were removed. If logPrunePageSize is set to 0, it will always return true unless an actual error is encountered
 func (lp *logPoller) PruneExpiredLogs(ctx context.Context) (bool, error) {
+	done := true
+
 	rowsRemoved, err := lp.orm.DeleteExpiredLogs(ctx, lp.logPrunePageSize)
+	if err != nil {
+		lp.lggr.Errorw("Unable to find excess logs for pruning", "err", err)
+		return false, err
+	} else if lp.logPrunePageSize != 0 && rowsRemoved == lp.logPrunePageSize {
+		done = false
+	}
+
+	if !lp.countBasedLogPruningActive.Load() {
+		return done, err
+	}
+
+	rowIDs, err := lp.orm.SelectExcessLogIDs(ctx, lp.logPrunePageSize)
+	if err != nil {
+		lp.lggr.Errorw("Unable to find excess logs for pruning", "err", err)
+		return false, err
+	}
+	rowsRemoved, err = lp.orm.DeleteLogsByRowID(ctx, rowIDs)
+	if err != nil {
+		lp.lggr.Errorw("Unable to prune excess logs", "err", err)
+	} else if lp.logPrunePageSize != 0 && rowsRemoved == lp.logPrunePageSize {
+		done = false
+	}
+	return done, err
+}
+
+// PruneUnmatchedLogs will attempt to remove any logs which no longer match a registered filter. Returns whether all unmatched
+// logs were removed. If logPrunePageSize is set to 0, it will always return true unless an actual error is encountered
+func (lp *logPoller) PruneUnmatchedLogs(ctx context.Context) (bool, error) {
+	ids, err := lp.orm.SelectUnmatchedLogIDs(ctx, lp.logPrunePageSize)
+	if err != nil {
+		return false, err
+	}
+	rowsRemoved, err := lp.orm.DeleteLogsByRowID(ctx, ids)
+
 	return lp.logPrunePageSize == 0 || rowsRemoved < lp.logPrunePageSize, err
 }
 
@@ -1285,11 +1384,12 @@ func (lp *logPoller) fillRemainingBlocksFromRPC(
 	logPollerBlocks := make(map[uint64]LogPollerBlock)
 	for _, head := range evmBlocks {
 		logPollerBlocks[uint64(head.Number)] = LogPollerBlock{
-			EvmChainId:     head.EVMChainID,
-			BlockHash:      head.Hash,
-			BlockNumber:    head.Number,
-			BlockTimestamp: head.Timestamp,
-			CreatedAt:      head.Timestamp,
+			EvmChainId:           head.EVMChainID,
+			BlockHash:            head.Hash,
+			BlockNumber:          head.Number,
+			BlockTimestamp:       head.Timestamp,
+			FinalizedBlockNumber: head.Number, // always finalized; only matters if this block is returned by LatestBlock()
+			CreatedAt:            head.Timestamp,
 		}
 	}
 	return logPollerBlocks, nil
@@ -1526,6 +1626,25 @@ func EvmWord(i uint64) common.Hash {
 	return common.BytesToHash(b)
 }
 
-func (lp *logPoller) FilteredLogs(ctx context.Context, queryFilter query.KeyFilter, limitAndSort query.LimitAndSort, queryName string) ([]Log, error) {
+func (lp *logPoller) FilteredLogs(ctx context.Context, queryFilter []query.Expression, limitAndSort query.LimitAndSort, queryName string) ([]Log, error) {
 	return lp.orm.FilteredLogs(ctx, queryFilter, limitAndSort, queryName)
+}
+
+// Where is a query.Where wrapper that ignores the Key and returns a slice of query.Expression rather than query.KeyFilter.
+// If no expressions are provided, or an error occurs, an empty slice is returned.
+func Where(expressions ...query.Expression) ([]query.Expression, error) {
+	filter, err := query.Where(
+		"",
+		expressions...,
+	)
+
+	if err != nil {
+		return []query.Expression{}, err
+	}
+
+	if filter.Expressions == nil {
+		return []query.Expression{}, nil
+	}
+
+	return filter.Expressions, nil
 }

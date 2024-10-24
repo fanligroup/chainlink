@@ -12,21 +12,18 @@ import (
 	"github.com/smartcontractkit/chainlink/v2/common/types"
 )
 
-//go:generate mockery --quiet --name sendOnlyClient --structname mockSendOnlyClient --filename "mock_send_only_client_test.go" --inpackage --case=underscore
 type sendOnlyClient[
 	CHAIN_ID types.ID,
 ] interface {
 	Close()
 	ChainID(context.Context) (CHAIN_ID, error)
-	DialHTTP() error
+	Dial(ctx context.Context) error
 }
 
 // SendOnlyNode represents one node used as a sendonly
-//
-//go:generate mockery --quiet --name SendOnlyNode --structname mockSendOnlyNode --filename "mock_send_only_node_test.go"  --inpackage --case=underscore
 type SendOnlyNode[
 	CHAIN_ID types.ID,
-	RPC sendOnlyClient[CHAIN_ID],
+	RPC any,
 ] interface {
 	// Start may attempt to connect to the node, but should only return error for misconfiguration - never for temporary errors.
 	Start(context.Context) error
@@ -100,7 +97,7 @@ func (s *sendOnlyNode[CHAIN_ID, RPC]) start(startCtx context.Context) {
 		panic(fmt.Sprintf("cannot dial node with state %v", s.state))
 	}
 
-	err := s.rpc.DialHTTP()
+	err := s.rpc.Dial(startCtx)
 	if err != nil {
 		promPoolRPCNodeTransitionsToUnusable.WithLabelValues(s.chainID.String(), s.name).Inc()
 		s.log.Errorw("Dial failed: SendOnly Node is unusable", "err", err)

@@ -1,6 +1,7 @@
 package testspecs
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"strconv"
 	"strings"
@@ -10,9 +11,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/test-go/testify/require"
 
-	pkgworkflows "github.com/smartcontractkit/chainlink-common/pkg/workflows"
 	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/assets"
 	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/utils"
+	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
 	"github.com/smartcontractkit/chainlink/v2/core/services/job"
 	"github.com/smartcontractkit/chainlink/v2/core/services/vrf/vrfcommon"
 	"github.com/smartcontractkit/chainlink/v2/core/services/webhook"
@@ -24,7 +25,7 @@ var (
 type                = "cron"
 schemaVersion       = 1
 schedule            = "CRON_TZ=UTC * 0 0 1 1 *"
-externalJobID       =  "%s"
+externalJobID       = "%s"
 observationSource   = """
 ds          [type=http method=GET url="https://chain.link/ETH-USD"];
 ds_parse    [type=jsonparse path="data,price"];
@@ -36,7 +37,20 @@ ds -> ds_parse -> ds_multiply;
 type                = "cron"
 schemaVersion       = 1
 schedule            = "CRON_TZ=UTC * 0 0 1 1 *"
-externalJobID       =  "%s"
+externalJobID       = "%s"
+observationSource   = """
+ds          [type=http method=GET url="https://chain.link/ETH-USD"];
+ds_parse    [type=jsonparse path="data.price" separator="."];
+ds_multiply [type=multiply times=100];
+ds -> ds_parse -> ds_multiply;
+"""
+`
+	CronSpecEVMChainIDTemplate = `
+type                = "cron"
+schemaVersion       = 1
+schedule            = "CRON_TZ=UTC * 0 0 1 1 *"
+externalJobID       = "%s"
+evmChainID          = "42"
 observationSource   = """
 ds          [type=http method=GET url="https://chain.link/ETH-USD"];
 ds_parse    [type=jsonparse path="data.price" separator="."];
@@ -62,7 +76,7 @@ type                = "directrequest"
 schemaVersion       = 1
 name                = "%s"
 contractAddress     = "0x613a38AC1659769640aaE063C651F48E0250454C"
-externalJobID       =  "%s"
+externalJobID       = "%s"
 evmChainID 			= "0"
 observationSource   = """
     ds1          [type=http method=GET url="http://example.com" allowunrestrictednetworkaccess="true"];
@@ -886,9 +900,8 @@ func (w WorkflowJobSpec) Job() job.Job {
 // GenerateWorkflowJobSpec creates a WorkflowJobSpec from the given workflow yaml spec string
 func GenerateWorkflowJobSpec(t *testing.T, spec string) WorkflowJobSpec {
 	t.Helper()
-	s, err := pkgworkflows.ParseWorkflowSpecYaml(spec)
-	require.NoError(t, err, "failed to parse YAML workflow spec %s", spec)
-	id := s.CID
+	sum := sha256.Sum256([]byte(spec))
+	id := fmt.Sprintf("%x", sum)
 	template := `
 type = "workflow"
 schemaVersion = 1
@@ -900,7 +913,7 @@ workflow = """
 `
 
 	toml := fmt.Sprintf(template, id, spec)
-	j, err := workflows.ValidatedWorkflowJobSpec(toml)
+	j, err := workflows.ValidatedWorkflowJobSpec(testutils.Context(t), toml)
 	require.NoError(t, err, "failed to validate TOML job spec for workflow %s", toml)
 	return WorkflowJobSpec{toml: toml, j: j}
 }
